@@ -1,6 +1,6 @@
-# HermitTools v0 Runtime
+# RookTools v0 Runtime
 
-LevraTech v0 Runtime (HermitTools) is a local, single-container appliance for running multi-agent systems with file-backed state and NATS communication.
+LevraTech v0 Runtime (RookTools) is a local, single-container appliance for running multi-agent systems with file-backed state and NATS communication.
 
 ## Features
 - **Parallel Multi-Agent**: Multiple agents running in isolated processes.
@@ -14,13 +14,13 @@ LevraTech v0 Runtime (HermitTools) is a local, single-container appliance for ru
 
 ### 1. Build the Docker Image
 ```bash
-docker build -t hermit-v0 .
+docker build -t rook-v0 .
 ```
 
 ### 2. Run the Container
 Mount a local folder to `/data` to persist state.
 ```bash
-docker run -p 7070:7070 -p 4222:4222 -v $(pwd)/hermit_data:/data hermit-v0
+docker run -p 7070:7070 -p 4222:4222 -v $(pwd)/rook_data:/data rook-v0
 ```
 
 ## Accessing the UI
