@@ -329,11 +329,26 @@ class RuntimeController {
   }
 
   private saveAgents() {
-    fs.writeFileSync(path.join(SYSTEM_DIR, 'agents.json'), JSON.stringify(Array.from(this.agents.values()), null, 2));
+    this.safeWriteJson(path.join(SYSTEM_DIR, 'agents.json'), Array.from(this.agents.values()));
   }
 
   private saveSchedules() {
-    fs.writeFileSync(path.join(SYSTEM_DIR, 'schedules.json'), JSON.stringify(this.schedules, null, 2));
+    this.safeWriteJson(path.join(SYSTEM_DIR, 'schedules.json'), this.schedules);
+  }
+
+  private safeWriteJson(filePath: string, data: any) {
+    const tempPath = `${filePath}.tmp`;
+    try {
+      const content = JSON.stringify(data, null, 2);
+      fs.writeFileSync(tempPath, content);
+      fs.renameSync(tempPath, filePath);
+    } catch (err) {
+      console.error(`Failed to atomically write JSON to ${filePath}:`, err);
+      // Clean up temp file if it exists
+      if (fs.existsSync(tempPath)) {
+        try { fs.unlinkSync(tempPath); } catch (e) {}
+      }
+    }
   }
 
   private materializeAgentFolder(name: string) {

@@ -10,6 +10,18 @@ LevraTech v0 Runtime (RookTools) is a local, single-container appliance for runn
 - **WebSocket Bridge**: Connect browser UI to NATS at `/_/nats`.
 - **Interval & Cron Scheduler**: Trigger agents on schedule.
 
+## Technical Architecture
+
+### Atomic Persistence
+To ensure resilience against power loss or crashes, the Runtime implements **Atomic Persistence** for core system configuration files (`agents.json` and `schedules.json`).
+- Changes are first written to a temporary file (`.tmp`).
+- The temporary file is then atomically renamed to the target filename.
+- This ensures the configuration is never in a partially-written state.
+
+### Memory/System Boundary
+- **System Config**: Uses atomic renames (as described above) to protect the "constitution" of the runtime.
+- **Agent Memory**: Writes to `/data/system/agents/*/memory/` utilize standard, non-atomic file operations. This provides "best-effort" performance for frequent agent updates (thoughts/scratchpads) where high-frequency throughput is prioritized over absolute atomic guarantees.
+
 ## Build and Run
 
 ### 1. Build the Docker Image
