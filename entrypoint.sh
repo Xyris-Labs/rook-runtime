@@ -5,8 +5,8 @@ set -e
 nats-server -p 4222 &
 
 # Wait for NATS to be ready
-until nats-server --ping; do
-  echo "Waiting for NATS server..."
+while ! (echo > /dev/tcp/localhost/4222) >/dev/null 2>&1; do
+  echo "Waiting for NATS server on port 4222..."
   sleep 1
 done
 
