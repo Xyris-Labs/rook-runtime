@@ -10,6 +10,7 @@ import { Envelope, AgentConfig, ScheduleEntry, SUBJECTS } from '../types';
 
 const DATA_ROOT = '/data';
 const SYSTEM_DIR = path.join(DATA_ROOT, 'system');
+const UI_DIR = path.join(DATA_ROOT, 'ui');
 const AGENTS_DIR = path.join(SYSTEM_DIR, 'agents');
 const SESSIONS_DIR = path.join(SYSTEM_DIR, 'sessions');
 const ARTIFACTS_DIR = path.join(DATA_ROOT, 'artifacts');
@@ -39,6 +40,7 @@ class RuntimeController {
       this.loadConfig();
       this.setupToolHandlers();
       this.setupIngressHandlers();
+      this.setupWatchers();
       this.startScheduler();
       this.spawnEnabledAgents();
       this.startHttpServer();
@@ -66,7 +68,7 @@ class RuntimeController {
   }
 
   private ensureDirectories() {
-    [SYSTEM_DIR, AGENTS_DIR, SESSIONS_DIR, ARTIFACTS_DIR, CACHE_DIR].forEach(dir => {
+    [SYSTEM_DIR, UI_DIR, AGENTS_DIR, SESSIONS_DIR, ARTIFACTS_DIR, CACHE_DIR].forEach(dir => {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
         console.log(`Created directory: ${dir}`);
@@ -90,16 +92,192 @@ class RuntimeController {
         console.log(`Created default file: ${filePath}`);
       }
     });
+
+    const uiPath = path.join(UI_DIR, 'index.html');
+    if (!fs.existsSync(uiPath)) {
+      const defaultUI = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RookTools v0 UI</title>
+    <style>
+        body { font-family: monospace; background: #121212; color: #00ff00; margin: 20px; }
+        #terminal { border: 1px solid #333; height: 400px; overflow-y: scroll; padding: 10px; margin-bottom: 10px; }
+        .log-entry { margin-bottom: 5px; }
+        .log-agent { color: #00ffff; }
+        .log-ui { color: #ffff00; }
+        input, button, select { background: #222; color: #00ff00; border: 1px solid #333; padding: 5px; }
+    </style>
+</head>
+<body>
+    <h1>RookTools v0</h1>
+    <div id="terminal"></div>
+    <div>
+        <select id="agent-select">
+            <option value="">Select Agent</option>
+        </select>
+        <input type="text" id="message-input" placeholder="Type a message..." size="50">
+        <button id="send-btn">Send</button>
+    </div>
+    <div style="margin-top: 10px;">
+        <button id="create-agent-btn">Create Agent "jerry"</button>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/nats.ws@1.29.0/dist/nats.ws.js"></script>
+    <script>
+        const terminal = document.getElementById('terminal');
+        const agentSelect = document.getElementById('agent-select');
+        const messageInput = document.getElementById('message-input');
+        const sendBtn = document.getElementById('send-btn');
+        const createAgentBtn = document.getElementById('create-agent-btn');
+
+        function log(msg, type = 'ui') {
+            const div = document.createElement('div');
+            div.className = 'log-entry';
+            const span = document.createElement('span');
+            span.className = 'log-' + type;
+            span.textContent = \`[\${new Date().toLocaleTimeString()}] \${type.toUpperCase()}: \`;
+            div.appendChild(span);
+            div.appendChild(document.createTextNode(typeof msg === 'object' ? JSON.stringify(msg) : msg));
+            terminal.appendChild(div);
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+
+        async function init() {
+            try {
+                const nc = await nats.connect({
+                    servers: [\`ws://\${window.location.host}/_/nats\`],
+                });
+                log('Connected to NATS via WS bridge');
+
+                const jc = nats.JSONCodec();
+
+                // Listen for agent ready events to populate select
+                nc.subscribe('agent.*.ready', {
+                    callback: (err, msg) => {
+                        const envelope = jc.decode(msg.data);
+                        const name = envelope.agent;
+                        if (!Array.from(agentSelect.options).some(opt => opt.value === name)) {
+                            const opt = document.createElement('option');
+                            opt.value = name;
+                            opt.textContent = name;
+                            agentSelect.appendChild(opt);
+                            log(\`Agent \${name} is ready\`, 'ui');
+                        }
+                    }
+                });
+
+                // Listen for agent outputs
+                nc.subscribe('egress.ui.*', {
+                    callback: (err, msg) => {
+                        const envelope = jc.decode(msg.data);
+                        log(envelope.payload.text || envelope.payload.error, 'agent');
+                    }
+                });
+
+                // Listen for runtime ready
+                nc.subscribe('runtime.ready', {
+                    callback: () => log('Runtime is ready', 'ui')
+                });
+
+                // Request agent list on start
+                const res = await nc.request('tool.agent.list', jc.encode({
+                    id: 'init-list',
+                    ts: new Date().toISOString(),
+                    type: 'ToolRequest',
+                    from: 'ui',
+                    to: 'tool.agent.list',
+                    payload: {}
+                }));
+                const agents = jc.decode(res.data).payload;
+                agents.forEach(a => {
+                    if (!Array.from(agentSelect.options).some(opt => opt.value === a.name)) {
+                        const opt = document.createElement('option');
+                        opt.value = a.name;
+                        opt.textContent = a.name;
+                        agentSelect.appendChild(opt);
+                    }
+                });
+
+                sendBtn.onclick = () => {
+                    const agent = agentSelect.value;
+                    const text = messageInput.value;
+                    if (!agent || !text) return;
+
+                    nc.publish('ingress.ui.message', jc.encode({
+                        id: crypto.randomUUID(),
+                        ts: new Date().toISOString(),
+                        type: 'UserMessage',
+                        from: 'ui',
+                        to: 'ingress.ui.message',
+                        agent: agent,
+                        payload: { text: text }
+                    }));
+                    log(\`Sent to \${agent}: \${text}\`, 'ui');
+                    messageInput.value = '';
+                };
+
+                createAgentBtn.onclick = async () => {
+                    nc.request('tool.agent.create', jc.encode({
+                        id: crypto.randomUUID(),
+                        ts: new Date().toISOString(),
+                        type: 'ToolRequest',
+                        from: 'ui',
+                        to: 'tool.agent.create',
+                        payload: {
+                            id: 'jerry',
+                            name: 'jerry',
+                            enabled: true,
+                            inbox: 'agent.jerry.inbox',
+                            path: '/data/system/agents/jerry'
+                        }
+                    }));
+                    log('Requested creation of agent "jerry"', 'ui');
+                };
+
+            } catch (err) {
+                log('Connection error: ' + err.message, 'ui');
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>`;
+      fs.writeFileSync(uiPath, defaultUI);
+      console.log(`Created default UI: ${uiPath}`);
+    }
   }
 
   private loadConfig() {
     const agentsPath = path.join(SYSTEM_DIR, 'agents.json');
-    const agentList: AgentConfig[] = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
-    this.agents.clear();
-    agentList.forEach(a => this.agents.set(a.name, a));
+    if (fs.existsSync(agentsPath)) {
+      const agentList: AgentConfig[] = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
+      this.agents.clear();
+      agentList.forEach(a => this.agents.set(a.name, a));
+    }
 
     const schedulesPath = path.join(SYSTEM_DIR, 'schedules.json');
-    this.schedules = JSON.parse(fs.readFileSync(schedulesPath, 'utf8'));
+    if (fs.existsSync(schedulesPath)) {
+      this.schedules = JSON.parse(fs.readFileSync(schedulesPath, 'utf8'));
+    }
+  }
+
+  private setupWatchers() {
+    fs.watch(SYSTEM_DIR, (eventType, filename) => {
+      if (filename && filename.endsWith('.json') && !filename.endsWith('.tmp')) {
+        console.log(`System state updated on disk (${filename}). Reloading config...`);
+        this.loadConfig();
+        this.updateScheduler();
+      }
+    });
+
+    fs.watch(UI_DIR, (eventType, filename) => {
+      if (filename) {
+        console.log(`UI asset updated on disk (${filename}).`);
+      }
+    });
   }
 
   private publish(subject: string, envelope: Envelope) {
@@ -370,15 +548,30 @@ class RuntimeController {
   private startHttpServer() {
     const port = parseInt(process.env.HTTP_PORT || '7070');
     const server = http.createServer((req, res) => {
-      let filePath = path.join(__dirname, '../../ui', req.url === '/' ? 'index.html' : req.url!);
-      
-      // Basic file browser for /data
-      if (req.url?.startsWith('/data')) {
-        filePath = path.join('/', req.url);
+      let urlPath = req.url === '/' ? '/index.html' : req.url!;
+      let filePath: string;
+
+      if (urlPath.startsWith('/data')) {
+        filePath = path.join('/', urlPath);
+      } else {
+        filePath = path.join(UI_DIR, urlPath);
       }
 
       if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-        res.writeHead(200);
+        const ext = path.extname(filePath).toLowerCase();
+        let contentType = 'text/plain';
+        if (ext === '.html') contentType = 'text/html';
+        else if (ext === '.js') contentType = 'application/javascript';
+        else if (ext === '.json') contentType = 'application/json';
+        else if (ext === '.css') contentType = 'text/css';
+
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+          'Pragma': 'no-cache',
+          'Expires': '0',
+          'Surrogate-Control': 'no-store'
+        });
         fs.createReadStream(filePath).pipe(res);
       } else {
         res.writeHead(404);
@@ -406,14 +599,6 @@ class RuntimeController {
   }
 
   private handleWsBridge(ws: WebSocket) {
-    const natsUrl = process.env.NATS_URL || 'nats://localhost:4222';
-    // Use a separate connection or proxy. v0 spec says "minimal proxy".
-    // Simple way: connect to NATS for each WS client or use a single bridge.
-    // Spec: "The bridge can be a simple proxy that forwards bytes/frames".
-    // Since nats.ws expects a websocket, we can just connect the browser to NATS directly if NATS supports WS.
-    // But spec says "WebSocket bridge at /_/nats that upgrades WebSocket connections and forwards them to NATS internally".
-    // This implies the Runtime acts as a proxy to the NATS TCP port.
-    
     const net = require('net');
     const natsSocket = net.connect(4222, 'localhost', () => {
       ws.on('message', (data: Buffer) => natsSocket.write(data));

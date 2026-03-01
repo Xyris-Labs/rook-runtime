@@ -12,9 +12,8 @@ WORKDIR /app
 COPY package*.json tsconfig.json ./
 RUN npm install
 
-# Copy source code and UI
+# Copy source code
 COPY src ./src
-COPY ui ./ui
 COPY entrypoint.sh ./
 
 RUN chmod +x entrypoint.sh

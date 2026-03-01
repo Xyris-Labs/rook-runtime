@@ -22,6 +22,12 @@ To ensure resilience against power loss or crashes, the Runtime implements **Ato
 - **System Config**: Uses atomic renames (as described above) to protect the "constitution" of the runtime.
 - **Agent Memory**: Writes to `/data/system/agents/*/memory/` utilize standard, non-atomic file operations. This provides "best-effort" performance for frequent agent updates (thoughts/scratchpads) where high-frequency throughput is prioritized over absolute atomic guarantees.
 
+### Unified Data Mount
+All runtime assets, including the UI, live in the `/data` mount.
+- `/data/ui/index.html`: The default interface, which can be edited live for immediate changes.
+- `/data/system`: Core configuration and agent definitions.
+- The runtime watches `/data/system` for changes and automatically reloads configuration.
+
 ## Build and Run
 
 ### 1. Build the Docker Image
@@ -30,15 +36,16 @@ docker build -t rook-v0 .
 ```
 
 ### 2. Run the Container
-Mount a local folder to `/data` to persist state.
+Mount a local folder to `/data` to persist state and UI.
 ```bash
 docker run -p 7070:7070 -p 4222:4222 -v $(pwd)/rook_data:/data rook-v0
 ```
 
 ## Accessing the UI
-Open your browser to `http://localhost:7070`.
+Open your browser to `http://localhost:7070`. You can edit `rook_data/ui/index.html` on your host machine to customize the UI without restarting the container.
 
 ## Folder Structure (/data)
+- `/ui`: Web interface assets.
 - `/system`: Core configuration (agents.json, schedules.json, etc.)
 - `/system/agents/<name>`: Agent profile and persona.
 - `/system/agents/<name>/memory`: Agent's private scratchpad.
