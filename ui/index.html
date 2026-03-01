@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HermitTools v0 UI</title>
+    <style>
+        body { font-family: monospace; background: #121212; color: #00ff00; margin: 20px; }
+        #terminal { border: 1px solid #333; height: 400px; overflow-y: scroll; padding: 10px; margin-bottom: 10px; }
+        .log-entry { margin-bottom: 5px; }
+        .log-agent { color: #00ffff; }
+        .log-ui { color: #ffff00; }
+        input, button, select { background: #222; color: #00ff00; border: 1px solid #333; padding: 5px; }
+    </style>
+</head>
+<body>
+    <h1>HermitTools v0</h1>
+    <div id="terminal"></div>
+    <div>
+        <select id="agent-select">
+            <option value="">Select Agent</option>
+        </select>
+        <input type="text" id="message-input" placeholder="Type a message..." size="50">
+        <button id="send-btn">Send</button>
+    </div>
+    <div style="margin-top: 10px;">
+        <button id="create-agent-btn">Create Agent "jerry"</button>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/nats.ws@1.24.0/dist/nats.ws.js"></script>
+    <script>
+        const terminal = document.getElementById('terminal');
+        const agentSelect = document.getElementById('agent-select');
+        const messageInput = document.getElementById('message-input');
+        const sendBtn = document.getElementById('send-btn');
+        const createAgentBtn = document.getElementById('create-agent-btn');
+
+        function log(msg, type = 'ui') {
+            const div = document.createElement('div');
+            div.className = 'log-entry';
+            const span = document.createElement('span');
+            span.className = 'log-' + type;
+            span.textContent = `[${new Date().toLocaleTimeString()}] ${type.toUpperCase()}: `;
+            div.appendChild(span);
+            div.appendChild(document.createTextNode(typeof msg === 'object' ? JSON.stringify(msg) : msg));
+            terminal.appendChild(div);
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+
+        async function init() {
+            try {
+                const nc = await nats.connect({
+                    servers: [`ws://${window.location.host}/_/nats`],
+                });
+                log('Connected to NATS via WS bridge');
+
+                const jc = nats.JSONCodec();
+
+                // Listen for agent ready events to populate select
+                nc.subscribe('agent.*.ready', {
+                    callback: (err, msg) => {
+                        const envelope = jc.decode(msg.data);
+                        const name = envelope.agent;
+                        if (!Array.from(agentSelect.options).some(opt => opt.value === name)) {
+                            const opt = document.createElement('option');
+                            opt.value = name;
+                            opt.textContent = name;
+                            agentSelect.appendChild(opt);
+                            log(`Agent ${name} is ready`, 'ui');
+                        }
+                    }
+                });
+
+                // Listen for agent outputs
+                nc.subscribe('egress.ui.*', {
+                    callback: (err, msg) => {
+                        const envelope = jc.decode(msg.data);
+                        log(envelope.payload.text || envelope.payload.error, 'agent');
+                    }
+                });
+
+                // Listen for runtime ready
+                nc.subscribe('runtime.ready', {
+                    callback: () => log('Runtime is ready', 'ui')
+                });
+
+                // Request agent list on start
+                const res = await nc.request('tool.agent.list', jc.encode({
+                    id: 'init-list',
+                    ts: new Date().toISOString(),
+                    type: 'ToolRequest',
+                    from: 'ui',
+                    to: 'tool.agent.list',
+                    payload: {}
+                }));
+                const agents = jc.decode(res.data).payload;
+                agents.forEach(a => {
+                    if (!Array.from(agentSelect.options).some(opt => opt.value === a.name)) {
+                        const opt = document.createElement('option');
+                        opt.value = a.name;
+                        opt.textContent = a.name;
+                        agentSelect.appendChild(opt);
+                    }
+                });
+
+                sendBtn.onclick = () => {
+                    const agent = agentSelect.value;
+                    const text = messageInput.value;
+                    if (!agent || !text) return;
+
+                    nc.publish('ingress.ui.message', jc.encode({
+                        id: crypto.randomUUID(),
+                        ts: new Date().toISOString(),
+                        type: 'UserMessage',
+                        from: 'ui',
+                        to: 'ingress.ui.message',
+                        agent: agent,
+                        payload: { text: text }
+                    }));
+                    log(`Sent to ${agent}: ${text}`, 'ui');
+                    messageInput.value = '';
+                };
+
+                createAgentBtn.onclick = async () => {
+                    nc.request('tool.agent.create', jc.encode({
+                        id: crypto.randomUUID(),
+                        ts: new Date().toISOString(),
+                        type: 'ToolRequest',
+                        from: 'ui',
+                        to: 'tool.agent.create',
+                        payload: {
+                            id: 'jerry',
+                            name: 'jerry',
+                            enabled: true,
+                            inbox: 'agent.jerry.inbox',
+                            path: '/data/system/agents/jerry'
+                        }
+                    }));
+                    log('Requested creation of agent "jerry"', 'ui');
+                };
+
+            } catch (err) {
+                log('Connection error: ' + err.message, 'ui');
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>
