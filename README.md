@@ -22,11 +22,30 @@ To ensure resilience against power loss or crashes, the Runtime implements **Ato
 - **System Config**: Uses atomic renames (as described above) to protect the "constitution" of the runtime.
 - **Agent Memory**: Writes to `/data/system/agents/*/memory/` utilize standard, non-atomic file operations. This provides "best-effort" performance for frequent agent updates (thoughts/scratchpads) where high-frequency throughput is prioritized over absolute atomic guarantees.
 
-### Unified Data Mount
+### Unified Data Mount (Single Mount)
 All runtime assets, including the UI, live in the `/data` mount.
-- `/data/ui/index.html`: The default interface, which can be edited live for immediate changes.
+- `/data/ui`: The interface directory, which is served by the runtime.
 - `/data/system`: Core configuration and agent definitions.
 - The runtime watches `/data/system` for changes and automatically reloads configuration.
+
+## Development Workflow: React Cockpit
+
+The project includes a React-based UI called the **Cockpit** located in `/ui-cockpit`.
+
+### To Update the UI:
+1. Navigate to the `ui-cockpit` folder:
+   ```bash
+   cd ui-cockpit
+   ```
+2. Install dependencies (first time only):
+   ```bash
+   npm install
+   ```
+3. Build and deploy:
+   ```bash
+   npm run build
+   ```
+   This will automatically build the React application and deploy it into `rook_data/ui/` (mapped to `/data/ui/` in the container).
 
 ## Build and Run
 
@@ -42,10 +61,10 @@ docker run -p 7070:7070 -p 4222:4222 -v $(pwd)/rook_data:/data rook-v0
 ```
 
 ## Accessing the UI
-Open your browser to `http://localhost:7070`. You can edit `rook_data/ui/index.html` on your host machine to customize the UI without restarting the container.
+Open your browser to `http://localhost:7070`.
 
 ## Folder Structure (/data)
-- `/ui`: Web interface assets.
+- `/ui`: Web interface assets (React Cockpit build).
 - `/system`: Core configuration (agents.json, schedules.json, etc.)
 - `/system/agents/<name>`: Agent profile and persona.
 - `/system/agents/<name>/memory`: Agent's private scratchpad.
