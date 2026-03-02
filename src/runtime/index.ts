@@ -25,16 +25,16 @@ class RuntimeController {
   private schedules: ScheduleEntry[] = [];
   private cronTasks: Map<string, cron.ScheduledTask> = new Map();
   private intervalTasks: Map<string, NodeJS.Timeout> = new Map();
-  private startTime: number = Date.now();
+  private bootTimestamp: number = Date.now();
   private heartbeatInterval?: NodeJS.Timeout;
 
   async start() {
     try {
       console.log('Starting v0 Runtime...');
-      this.startTime = Date.now();
       this.validateDataMount();
       this.ensureDirectories();
       this.ensureDefaultFiles();
+      this.loadRuntimeConfig();
 
       const natsUrl = process.env.NATS_URL || 'nats://localhost:4222';
       this.nc = await connect({ servers: natsUrl });
@@ -65,9 +65,25 @@ class RuntimeController {
     }
   }
 
+  private loadRuntimeConfig() {
+    const runtimeConfigPath = path.join(SYSTEM_DIR, 'runtime.json');
+    if (fs.existsSync(runtimeConfigPath)) {
+      const config = JSON.parse(fs.readFileSync(runtimeConfigPath, 'utf8'));
+      if (config.bootTimestamp) {
+        this.bootTimestamp = config.bootTimestamp;
+      } else {
+        config.bootTimestamp = this.bootTimestamp;
+        this.safeWriteJson(runtimeConfigPath, config);
+      }
+    } else {
+      const config = { bootTimestamp: this.bootTimestamp, http_port: 7070, nats_port: 4222 };
+      this.safeWriteJson(runtimeConfigPath, config);
+    }
+  }
+
   private startHeartbeat() {
     this.heartbeatInterval = setInterval(() => {
-      const uptime = Math.floor((Date.now() - this.startTime) / 1000);
+      const uptime = Math.floor((Date.now() - this.bootTimestamp) / 1000);
       const agentsActive = Array.from(this.workers.keys()).length;
       
       this.publish('egress.ui.heartbeat', {
@@ -77,9 +93,9 @@ class RuntimeController {
         from: 'runtime',
         to: 'egress.ui.heartbeat',
         payload: {
-          status: 'ok',
+          status: 'nominal',
           uptime,
-          lastBoot: new Date(this.startTime).toISOString(),
+          lastBoot: new Date(this.bootTimestamp).toISOString(),
           agentsActive
         }
       });
@@ -104,7 +120,7 @@ class RuntimeController {
   private ensureDefaultFiles() {
     const defaults = {
       'system.json': {},
-      'runtime.json': { http_port: 7070, nats_port: 4222 },
+      'runtime.json': { http_port: 7070, nats_port: 4222, bootTimestamp: Date.now() },
       'agents.json': [],
       'routing.json': {},
       'schedules.json': []
@@ -124,7 +140,12 @@ class RuntimeController {
     if (fs.existsSync(agentsPath)) {
       const agentList: AgentConfig[] = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
       this.agents.clear();
-      agentList.forEach(a => this.agents.set(a.name, a));
+      agentList.forEach(a => {
+        // Ensure new fields exist for legacy agents
+        if (!a.model) a.model = { provider: 'openai', name: 'gpt-4o', temp: 0.7 };
+        if (!a.contextFiles) a.contextFiles = [];
+        this.agents.set(a.name, a);
+      });
     }
 
     const schedulesPath = path.join(SYSTEM_DIR, 'schedules.json');
@@ -135,7 +156,7 @@ class RuntimeController {
 
   private setupWatchers() {
     fs.watch(SYSTEM_DIR, (eventType, filename) => {
-      if (filename && filename.endsWith('.json') && !filename.endsWith('.tmp')) {
+      if (filename && filename.endsWith('.json') && !filename.endsWith('.tmp') && filename !== 'runtime.json') {
         console.log(`System state updated on disk (${filename}). Reloading config...`);
         this.loadConfig();
         this.updateScheduler();
@@ -213,6 +234,8 @@ class RuntimeController {
               break;
             case SUBJECTS.TOOL.AGENT.CREATE:
               const newAgent = envelope.payload as AgentConfig;
+              if (!newAgent.model) newAgent.model = { provider: 'openai', name: 'gpt-4o', temp: 0.7 };
+              if (!newAgent.contextFiles) newAgent.contextFiles = [];
               this.agents.set(newAgent.name, newAgent);
               this.saveAgents();
               this.materializeAgentFolder(newAgent.name);
@@ -242,6 +265,46 @@ class RuntimeController {
               this.stopAgent(nameToDelete);
               this.agents.delete(nameToDelete);
               this.saveAgents();
+              result = { status: 'success' };
+              break;
+            case SUBJECTS.TOOL.AGENT.MIND.READ:
+              const agentToRead = this.agents.get(envelope.payload.name);
+              if (!agentToRead) throw new Error('Agent not found');
+              const files: { [path: string]: string } = {};
+              for (const relPath of agentToRead.contextFiles) {
+                const fullPath = path.join(agentToRead.path, relPath);
+                if (fs.existsSync(fullPath)) {
+                  files[relPath] = fs.readFileSync(fullPath, 'utf8');
+                } else {
+                  files[relPath] = '';
+                }
+              }
+              result = { files };
+              break;
+            case SUBJECTS.TOOL.AGENT.MIND.WRITE:
+              const agentToWrite = this.agents.get(envelope.payload.name);
+              if (!agentToWrite) throw new Error('Agent not found');
+              
+              // 1. Write provided file contents
+              if (envelope.payload.files) {
+                for (const [relPath, content] of Object.entries(envelope.payload.files)) {
+                  const fullPath = path.join(agentToWrite.path, relPath as string);
+                  fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+                  fs.writeFileSync(fullPath, content as string);
+                }
+              }
+
+              // 2. Update config
+              if (envelope.payload.model) agentToWrite.model = envelope.payload.model;
+              if (envelope.payload.contextFiles) agentToWrite.contextFiles = envelope.payload.contextFiles;
+              this.saveAgents();
+
+              // 3. Restart
+              if (this.workers.has(agentToWrite.name)) {
+                this.stopAgent(agentToWrite.name);
+                this.spawnAgent(agentToWrite);
+              }
+              
               result = { status: 'success' };
               break;
           }
@@ -418,10 +481,9 @@ class RuntimeController {
     });
 
     fs.writeFileSync(path.join(agentDir, 'profile.json'), JSON.stringify({ name }, null, 2));
-    fs.writeFileSync(path.join(personaDir, 'persona.md'), `# Persona for ${name}\n`);
-    fs.writeFileSync(path.join(personaDir, 'principles.md'), `# Principles for ${name}\n`);
-    fs.writeFileSync(path.join(personaDir, 'examples.md'), `# Examples for ${name}\n`);
-    fs.writeFileSync(path.join(memoryDir, 'scratch.md'), `# Scratch for ${name}\n`);
+    // Blank Slate: Don't write persona files by default if we want blank slate, 
+    // but materializeAgentFolder is for initial folder structure.
+    // I will keep it for now but the MIND API will be the primary way to manage them.
   }
 
   private startHttpServer() {

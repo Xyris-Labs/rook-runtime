@@ -36,12 +36,17 @@ const Dashboard: React.FC = () => {
   const [scheduleCount, setScheduleCount] = useState<number>(0);
   const [uptime, setUptime] = useState<string>('00:00:00');
   const [lastHeartbeat, setLastHeartbeat] = useState<string | null>(null);
+  const [isPulse, setIsPulse] = useState(false);
 
   const handleHeartbeat = useCallback((data: any) => {
     const payload = data.payload as HeartbeatPayload;
     setUptime(formatUptime(payload.uptime));
     setAgentCount(payload.agentsActive);
     setLastHeartbeat(new Date().toLocaleTimeString());
+    
+    // Flash the pulse icon
+    setIsPulse(true);
+    setTimeout(() => setIsPulse(false), 500);
   }, []);
 
   const handleLog = useCallback((data: any) => {
@@ -54,7 +59,6 @@ const Dashboard: React.FC = () => {
     const unsubHeartbeat = subscribe('egress.ui.heartbeat', handleHeartbeat);
     const unsubLogs = subscribe('egress.ui.*', handleLog);
 
-    // Initial counts (Schedules still need manual fetch as they aren't in heartbeat yet)
     const fetchInitial = async () => {
       try {
         const schedulesRes = await request('tool.schedule.list', { 
@@ -88,7 +92,7 @@ const Dashboard: React.FC = () => {
         </div>
         {lastHeartbeat && (
           <div className="text-[10px] text-gray-600 font-mono flex items-center gap-2">
-            <Activity size={10} className="text-primary animate-pulse" />
+            <Activity size={10} className={`${isPulse ? 'text-primary' : 'text-gray-800'} transition-colors duration-200`} />
             LAST PULSE: {lastHeartbeat}
           </div>
         )}

@@ -16,6 +16,12 @@ export interface AgentConfig {
   enabled: boolean;
   inbox: string;
   path: string;
+  model: {
+    provider: string;
+    name: string;
+    temp: number;
+  };
+  contextFiles: string[];
 }
 
 export interface ScheduleEntry {
@@ -54,7 +60,11 @@ export const SUBJECTS = {
       CREATE: 'tool.agent.create',
       UPDATE: 'tool.agent.update',
       ENABLE: 'tool.agent.enable',
-      DISABLE: 'tool.agent.disable'
+      DISABLE: 'tool.agent.disable',
+      MIND: {
+        READ: 'tool.agent.mind.read',
+        WRITE: 'tool.agent.mind.write'
+      }
     },
     SCHEDULE: {
       LIST: 'tool.schedule.list',
