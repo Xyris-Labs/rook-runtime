@@ -1,7 +1,7 @@
 export interface Envelope {
   id: string;
   ts: string;
-  type: 'UserMessage' | 'Tick' | 'CronFire' | 'ToolRequest' | 'ToolResult' | 'AgentOutput' | 'AgentReady' | 'RuntimeReady';
+  type: 'UserMessage' | 'Tick' | 'CronFire' | 'ToolRequest' | 'ToolResult' | 'AgentOutput' | 'AgentReady' | 'RuntimeReady' | 'Heartbeat';
   from: string;
   to: string;
   agent?: string;

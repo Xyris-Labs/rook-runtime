@@ -30,7 +30,7 @@ class RuntimeController {
 
   async start() {
     try {
-      console.log('Starting v0 Runtime...');
+      console.log('Starting Rook v0 Runtime...');
       this.validateDataMount();
       this.ensureDirectories();
       this.ensureDefaultFiles();
@@ -68,16 +68,21 @@ class RuntimeController {
   private loadRuntimeConfig() {
     const runtimeConfigPath = path.join(SYSTEM_DIR, 'runtime.json');
     if (fs.existsSync(runtimeConfigPath)) {
-      const config = JSON.parse(fs.readFileSync(runtimeConfigPath, 'utf8'));
-      if (config.bootTimestamp) {
-        this.bootTimestamp = config.bootTimestamp;
-      } else {
-        config.bootTimestamp = this.bootTimestamp;
-        this.safeWriteJson(runtimeConfigPath, config);
+      try {
+        const config = JSON.parse(fs.readFileSync(runtimeConfigPath, 'utf8'));
+        if (config.bootTimestamp) {
+          this.bootTimestamp = config.bootTimestamp;
+          console.log(`Resumed uptime from: ${new Date(this.bootTimestamp).toISOString()}`);
+        } else {
+          config.bootTimestamp = this.bootTimestamp;
+          this.safeWriteJson(runtimeConfigPath, config);
+        }
+      } catch (e) {
+        console.warn('Failed to parse runtime.json, resetting bootTimestamp');
+        this.safeWriteJson(runtimeConfigPath, { bootTimestamp: this.bootTimestamp, http_port: 7070, nats_port: 4222 });
       }
     } else {
-      const config = { bootTimestamp: this.bootTimestamp, http_port: 7070, nats_port: 4222 };
-      this.safeWriteJson(runtimeConfigPath, config);
+      this.safeWriteJson(runtimeConfigPath, { bootTimestamp: this.bootTimestamp, http_port: 7070, nats_port: 4222 });
     }
   }
 
@@ -141,7 +146,6 @@ class RuntimeController {
       const agentList: AgentConfig[] = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
       this.agents.clear();
       agentList.forEach(a => {
-        // Ensure new fields exist for legacy agents
         if (!a.model) a.model = { provider: 'openai', name: 'gpt-4o', temp: 0.7 };
         if (!a.contextFiles) a.contextFiles = [];
         this.agents.set(a.name, a);
@@ -193,8 +197,7 @@ class RuntimeController {
               result = fs.readFileSync(safePath, 'utf8');
               break;
             case SUBJECTS.TOOL.FS.WRITE:
-              fs.mkdirSync(path.dirname(safePath), { recursive: true });
-              fs.writeFileSync(safePath, content);
+              this.safeWriteFile(safePath, content);
               result = { status: 'success' };
               break;
             case SUBJECTS.TOOL.FS.LIST:
@@ -289,8 +292,7 @@ class RuntimeController {
               if (envelope.payload.files) {
                 for (const [relPath, content] of Object.entries(envelope.payload.files)) {
                   const fullPath = path.join(agentToWrite.path, relPath as string);
-                  fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-                  fs.writeFileSync(fullPath, content as string);
+                  this.safeWriteFile(fullPath, content as string);
                 }
               }
 
@@ -299,8 +301,8 @@ class RuntimeController {
               if (envelope.payload.contextFiles) agentToWrite.contextFiles = envelope.payload.contextFiles;
               this.saveAgents();
 
-              // 3. Restart
-              if (this.workers.has(agentToWrite.name)) {
+              // 3. Restart if enabled
+              if (agentToWrite.enabled) {
                 this.stopAgent(agentToWrite.name);
                 this.spawnAgent(agentToWrite);
               }
@@ -457,17 +459,23 @@ class RuntimeController {
   }
 
   private safeWriteJson(filePath: string, data: any) {
+    this.safeWriteFile(filePath, JSON.stringify(data, null, 2));
+  }
+
+  private safeWriteFile(filePath: string, content: string | Buffer) {
     const tempPath = `${filePath}.tmp`;
     try {
-      const content = JSON.stringify(data, null, 2);
+      if (!fs.existsSync(path.dirname(filePath))) {
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      }
       fs.writeFileSync(tempPath, content);
       fs.renameSync(tempPath, filePath);
     } catch (err) {
-      console.error(`Failed to atomically write JSON to ${filePath}:`, err);
-      // Clean up temp file if it exists
+      console.error(`Failed to atomically write file to ${filePath}:`, err);
       if (fs.existsSync(tempPath)) {
         try { fs.unlinkSync(tempPath); } catch (e) {}
       }
+      throw err;
     }
   }
 
@@ -480,10 +488,7 @@ class RuntimeController {
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     });
 
-    fs.writeFileSync(path.join(agentDir, 'profile.json'), JSON.stringify({ name }, null, 2));
-    // Blank Slate: Don't write persona files by default if we want blank slate, 
-    // but materializeAgentFolder is for initial folder structure.
-    // I will keep it for now but the MIND API will be the primary way to manage them.
+    this.safeWriteJson(path.join(agentDir, 'profile.json'), { name });
   }
 
   private startHttpServer() {

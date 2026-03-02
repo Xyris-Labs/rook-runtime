@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useNats } from '../context/NatsContext';
-import { RefreshCcw, Power, PowerOff, Trash2, Plus, X, Brain, Save, FilePlus } from 'lucide-react';
+import { RefreshCcw, Power, PowerOff, Trash2, Plus, X, Brain, Save, FilePlus, Loader2 } from 'lucide-react';
 
 interface Agent {
   name: string;
@@ -30,6 +30,7 @@ const Agents: React.FC = () => {
   const [editingModel, setEditingModel] = useState<Agent['model'] | null>(null);
   const [editingContextFiles, setEditingContextFiles] = useState<string[]>([]);
   const [newFilePath, setNewFilePath] = useState('');
+  const [savingMind, setSavingMind] = useState(false);
 
   const fetchAgents = useCallback(async () => {
     if (status !== 'connected') return;
@@ -123,6 +124,7 @@ const Agents: React.FC = () => {
     setEditingModel(agent.model);
     setEditingContextFiles(agent.contextFiles);
     setMindTab('config');
+    setMindFiles({});
     
     try {
       const res = await request('tool.agent.mind.read', {
@@ -133,7 +135,9 @@ const Agents: React.FC = () => {
         to: 'tool.agent.mind.read',
         payload: { name: agent.name }
       });
-      setMindFiles(res.payload.files);
+      if (res.payload && res.payload.files) {
+        setMindFiles(res.payload.files);
+      }
     } catch (err) {
       console.error('Failed to read agent mind:', err);
     }
@@ -142,8 +146,9 @@ const Agents: React.FC = () => {
   const saveMind = async () => {
     if (!selectedAgent || !editingModel) return;
 
+    setSavingMind(true);
     try {
-      await request('tool.agent.mind.write', {
+      const res = await request('tool.agent.mind.write', {
         id: crypto.randomUUID(),
         ts: new Date().toISOString(),
         type: 'ToolRequest',
@@ -156,20 +161,37 @@ const Agents: React.FC = () => {
           contextFiles: editingContextFiles
         }
       });
-      alert('Mind updated and agent restarted.');
-      fetchAgents();
-    } catch (err) {
+      
+      if (res.payload && res.payload.error) {
+        throw new Error(res.payload.error);
+      }
+
+      // Success
+      alert('Mind Saved & Restarted');
+      await fetchAgents();
+      // Update selected agent reference to latest
+      const updated = agents.find(a => a.name === selectedAgent.name);
+      if (updated) setSelectedAgent(updated);
+    } catch (err: any) {
       console.error('Failed to write agent mind:', err);
+      alert(`Save Error: ${err.message}`);
+    } finally {
+      setSavingMind(false);
     }
   };
 
   const addContextFile = () => {
-    if (!newFilePath) return;
-    if (editingContextFiles.includes(newFilePath)) return;
+    const path = newFilePath.trim();
+    if (!path) return;
+    if (editingContextFiles.includes(path)) {
+      setMindTab(path);
+      setNewFilePath('');
+      return;
+    }
     
-    setEditingContextFiles([...editingContextFiles, newFilePath]);
-    setMindFiles({ ...mindFiles, [newFilePath]: '' });
-    setMindTab(newFilePath);
+    setEditingContextFiles([...editingContextFiles, path]);
+    setMindFiles({ ...mindFiles, [path]: '' });
+    setMindTab(path);
     setNewFilePath('');
   };
 
@@ -288,10 +310,11 @@ const Agents: React.FC = () => {
             </div>
             <button 
               onClick={saveMind}
-              className="flex items-center gap-2 px-4 py-2 bg-primary text-black font-bold rounded hover:opacity-90 transition-opacity"
+              disabled={savingMind}
+              className="flex items-center gap-2 px-4 py-2 bg-primary text-black font-bold rounded hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <Save size={16} />
-              SAVE & RESTART
+              {savingMind ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+              {savingMind ? 'SAVING...' : 'SAVE & RESTART'}
             </button>
           </div>
 
@@ -306,8 +329,8 @@ const Agents: React.FC = () => {
               >
                 Configuration
               </button>
-              <div className="p-2 text-[10px] font-bold text-gray-600 uppercase tracking-widest mt-2 px-3">
-                Context Layers
+              <div className="p-2 text-[10px] font-bold text-gray-600 uppercase tracking-widest mt-2 px-3 flex justify-between items-center">
+                <span>Context Layers</span>
               </div>
               <div className="flex-1 overflow-y-auto">
                 {editingContextFiles.map(file => (
@@ -326,14 +349,16 @@ const Agents: React.FC = () => {
                 <div className="flex gap-1">
                   <input 
                     type="text" 
-                    placeholder="new/file.md"
+                    placeholder="path/to/file.md"
                     value={newFilePath}
                     onChange={(e) => setNewFilePath(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && addContextFile()}
                     className="flex-1 bg-black/40 border border-divider rounded p-1 text-[10px] text-primary outline-none"
                   />
                   <button 
                     onClick={addContextFile}
                     className="p-1 bg-primary text-black rounded hover:opacity-90"
+                    title="Add Context Layer"
                   >
                     <FilePlus size={14} />
                   </button>
