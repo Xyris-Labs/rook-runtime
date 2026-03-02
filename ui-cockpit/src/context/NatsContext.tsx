@@ -7,6 +7,7 @@ interface NatsContextType {
   status: 'connected' | 'disconnected' | 'connecting';
   request: <T = any, R = any>(subject: string, payload: T) => Promise<R>;
   publish: <T = any>(subject: string, payload: T) => void;
+  subscribe: (subject: string, callback: (data: any) => void) => () => void;
 }
 
 const NatsContext = createContext<NatsContextType | undefined>(undefined);
@@ -80,8 +81,35 @@ export const NatsProvider: React.FC<{ children: React.ReactNode }> = ({ children
     connectionRef.current.publish(subject, jc.encode(payload));
   }, []);
 
+  const subscribe = useCallback((subject: string, callback: (data: any) => void) => {
+    if (!connectionRef.current) {
+      console.warn('Attempted to subscribe before NATS was connected');
+      return () => {};
+    }
+
+    const sub = connectionRef.current.subscribe(subject);
+    let active = true;
+
+    (async () => {
+      for await (const msg of sub) {
+        if (!active) break;
+        try {
+          const data = jc.decode(msg.data);
+          callback(data);
+        } catch (err) {
+          console.error(`Error decoding NATS message from ${subject}:`, err);
+        }
+      }
+    })();
+
+    return () => {
+      active = false;
+      sub.unsubscribe();
+    };
+  }, []);
+
   return (
-    <NatsContext.Provider value={{ connection, status, request, publish }}>
+    <NatsContext.Provider value={{ connection, status, request, publish, subscribe }}>
       {children}
     </NatsContext.Provider>
   );

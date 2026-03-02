@@ -1,8 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useNats } from '../context/NatsContext';
-import { JSONCodec } from 'nats.ws';
-
-const jc = JSONCodec();
+import { Activity } from 'lucide-react';
 
 interface LogEntry {
   ts: string;
@@ -11,65 +9,89 @@ interface LogEntry {
   payload: any;
 }
 
+interface HeartbeatPayload {
+  status: string;
+  uptime: number;
+  lastBoot: string;
+  agentsActive: number;
+}
+
+const formatUptime = (totalSeconds: number) => {
+  const d = Math.floor(totalSeconds / 86400);
+  const h = Math.floor((totalSeconds % 86400) / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  
+  const hStr = h.toString().padStart(2, '0');
+  const mStr = m.toString().padStart(2, '0');
+  const sStr = s.toString().padStart(2, '0');
+  
+  return d > 0 ? `${d}d ${hStr}:${mStr}:${sStr}` : `${hStr}:${mStr}:${sStr}`;
+};
+
 const Dashboard: React.FC = () => {
-  const { connection, status, request } = useNats();
+  const { status, request, subscribe } = useNats();
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [agentCount, setAgentCount] = useState<number>(0);
   const [scheduleCount, setScheduleCount] = useState<number>(0);
   const [uptime, setUptime] = useState<string>('00:00:00');
-  const [startTime] = useState<number>(Date.now());
+  const [lastHeartbeat, setLastHeartbeat] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!connection) return;
+  const handleHeartbeat = useCallback((data: any) => {
+    const payload = data.payload as HeartbeatPayload;
+    setUptime(formatUptime(payload.uptime));
+    setAgentCount(payload.agentsActive);
+    setLastHeartbeat(new Date().toLocaleTimeString());
+  }, []);
 
-    // Subscribe to all egress.ui messages
-    const sub = connection.subscribe('egress.ui.*');
-    (async () => {
-      for await (const msg of sub) {
-        const entry = jc.decode(msg.data) as LogEntry;
-        setLogs(prev => [entry, ...prev].slice(0, 100));
-      }
-    })();
-
-    // Initial counts
-    const fetchCounts = async () => {
-      try {
-        const agentsRes = await request('tool.agent.list', { id: 'dash-init', ts: new Date().toISOString(), type: 'ToolRequest', from: 'ui', to: 'tool.agent.list', payload: {} });
-        setAgentCount(agentsRes.payload.length || 0);
-
-        const schedulesRes = await request('tool.schedule.list', { id: 'dash-init', ts: new Date().toISOString(), type: 'ToolRequest', from: 'ui', to: 'tool.schedule.list', payload: {} });
-        setScheduleCount(schedulesRes.payload.length || 0);
-      } catch (err) {
-        console.error('Failed to fetch initial dashboard data:', err);
-      }
-    };
-
-    fetchCounts();
-
-    return () => {
-      sub.unsubscribe();
-    };
-  }, [connection, request]);
+  const handleLog = useCallback((data: any) => {
+    setLogs(prev => [data as LogEntry, ...prev].slice(0, 100));
+  }, []);
 
   useEffect(() => {
     if (status !== 'connected') return;
 
-    const interval = setInterval(() => {
-      const seconds = Math.floor((Date.now() - startTime) / 1000);
-      const h = Math.floor(seconds / 3600).toString().padStart(2, '0');
-      const m = Math.floor((seconds % 3600) / 60).toString().padStart(2, '0');
-      const s = (seconds % 60).toString().padStart(2, '0');
-      setUptime(`${h}:${m}:${s}`);
-    }, 1000);
+    const unsubHeartbeat = subscribe('egress.ui.heartbeat', handleHeartbeat);
+    const unsubLogs = subscribe('egress.ui.*', handleLog);
 
-    return () => clearInterval(interval);
-  }, [status, startTime]);
+    // Initial counts (Schedules still need manual fetch as they aren't in heartbeat yet)
+    const fetchInitial = async () => {
+      try {
+        const schedulesRes = await request('tool.schedule.list', { 
+          id: crypto.randomUUID(), 
+          ts: new Date().toISOString(), 
+          type: 'ToolRequest', 
+          from: 'ui', 
+          to: 'tool.schedule.list', 
+          payload: {} 
+        });
+        setScheduleCount(schedulesRes.payload.length || 0);
+      } catch (err) {
+        console.error('Dashboard init fetch failed:', err);
+      }
+    };
+
+    fetchInitial();
+
+    return () => {
+      unsubHeartbeat();
+      unsubLogs();
+    };
+  }, [status, subscribe, request, handleHeartbeat, handleLog]);
 
   return (
     <div className="space-y-6">
-      <div className="border-b border-divider pb-4">
-        <h2 className="text-2xl font-black uppercase tracking-tighter italic">Dashboard</h2>
-        <p className="text-gray-500 text-sm">Real-time overview of the Rook v0 Runtime</p>
+      <div className="border-b border-divider pb-4 flex justify-between items-end">
+        <div>
+          <h2 className="text-2xl font-black uppercase tracking-tighter italic">Dashboard</h2>
+          <p className="text-gray-500 text-sm">Real-time overview of the Rook v0 Runtime</p>
+        </div>
+        {lastHeartbeat && (
+          <div className="text-[10px] text-gray-600 font-mono flex items-center gap-2">
+            <Activity size={10} className="text-primary animate-pulse" />
+            LAST PULSE: {lastHeartbeat}
+          </div>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

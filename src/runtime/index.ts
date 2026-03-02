@@ -25,10 +25,13 @@ class RuntimeController {
   private schedules: ScheduleEntry[] = [];
   private cronTasks: Map<string, cron.ScheduledTask> = new Map();
   private intervalTasks: Map<string, NodeJS.Timeout> = new Map();
+  private startTime: number = Date.now();
+  private heartbeatInterval?: NodeJS.Timeout;
 
   async start() {
     try {
       console.log('Starting v0 Runtime...');
+      this.startTime = Date.now();
       this.validateDataMount();
       this.ensureDirectories();
       this.ensureDefaultFiles();
@@ -43,6 +46,7 @@ class RuntimeController {
       this.setupWatchers();
       this.startScheduler();
       this.spawnEnabledAgents();
+      this.startHeartbeat();
       this.startHttpServer();
 
       this.publish(SUBJECTS.RUNTIME.READY, {
@@ -59,6 +63,27 @@ class RuntimeController {
       console.error('Boot failed:', err);
       process.exit(1);
     }
+  }
+
+  private startHeartbeat() {
+    this.heartbeatInterval = setInterval(() => {
+      const uptime = Math.floor((Date.now() - this.startTime) / 1000);
+      const agentsActive = Array.from(this.workers.keys()).length;
+      
+      this.publish('egress.ui.heartbeat', {
+        id: uuidv4(),
+        ts: new Date().toISOString(),
+        type: 'Heartbeat',
+        from: 'runtime',
+        to: 'egress.ui.heartbeat',
+        payload: {
+          status: 'ok',
+          uptime,
+          lastBoot: new Date(this.startTime).toISOString(),
+          agentsActive
+        }
+      });
+    }, 5000);
   }
 
   private validateDataMount() {
@@ -181,7 +206,10 @@ class RuntimeController {
         try {
           switch (subject) {
             case SUBJECTS.TOOL.AGENT.LIST:
-              result = Array.from(this.agents.values());
+              result = Array.from(this.agents.values()).map(a => ({
+                ...a,
+                isRunning: this.workers.has(a.name)
+              }));
               break;
             case SUBJECTS.TOOL.AGENT.CREATE:
               const newAgent = envelope.payload as AgentConfig;
@@ -208,6 +236,13 @@ class RuntimeController {
                 this.stopAgent(agentToDisable.name);
                 result = { status: 'success' };
               }
+              break;
+            case 'tool.agent.delete':
+              const nameToDelete = envelope.payload.name;
+              this.stopAgent(nameToDelete);
+              this.agents.delete(nameToDelete);
+              this.saveAgents();
+              result = { status: 'success' };
               break;
           }
         } catch (e: any) {
