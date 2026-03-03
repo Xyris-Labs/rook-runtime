@@ -57,7 +57,7 @@ export class Librarian {
   }
 
   private startHeartbeat() {
-    setInterval(async () => {
+    const sendStatus = async () => {
       const status: StatusEntry = {
         status: 'online',
         load: 0,
@@ -70,7 +70,10 @@ export class Librarian {
       } catch (err) {
         console.error('Librarian failed to put status:', err);
       }
-    }, 10000);
+    };
+    
+    sendStatus();
+    setInterval(sendStatus, 10000);
   }
 
   private resolvePath(req: FSReadRequest): string {
