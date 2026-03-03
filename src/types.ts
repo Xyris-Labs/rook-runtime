@@ -1,96 +1,91 @@
-export interface Envelope {
-  id: string;
-  ts: string;
-  type: 'UserMessage' | 'Tick' | 'CronFire' | 'ToolRequest' | 'ToolResult' | 'AgentOutput' | 'AgentReady' | 'RuntimeReady' | 'Heartbeat';
-  from: string;
-  to: string;
-  agent?: string;
-  session_id?: string;
-  correlation_id?: string;
-  payload: any;
+// --- Core Enums ---
+export enum ServiceType {
+  FS = 'service.fs',
+  EXECUTOR = 'service.executor',
+  TEMPO = 'service.tempo',
+  LLM_BROKER = 'service.llm.broker',
+  LLM_ADAPTER = 'service.llm.adapter',
+  WEB_HOST = 'service.web'
 }
 
-export interface AgentConfig {
-  id: string;
+export enum FSScope {
+  SYSTEM = 'system',
+  AGENT = 'agent',
+  ARTIFACT = 'artifact'
+}
+
+// --- JetStream KV Schemas ---
+export interface RegistryEntry {
+  type: ServiceType;
   name: string;
-  enabled: boolean;
-  inbox: string;
+  uuid: string;
+  first_seen: string; // ISO8601
+}
+
+export interface StatusEntry {
+  status: 'online' | 'offline' | 'auth_required' | 'error';
+  load: number; // 0-100
+  capabilities: string[]; // e.g., ["read", "write"] or ["gpt-4o", "claude-3.5"]
+  alerts: Array<{
+    type: string;
+    provider?: string;
+    code?: string;
+    url?: string;
+    message?: string;
+  }>;
+  last_seen: string; // ISO8601
+}
+
+// --- Handshake Payload ---
+export interface HandshakeRequest {
+  type: ServiceType;
+  name: string;
+}
+export interface HandshakeResponse {
+  uuid: string;
+}
+
+// --- Librarian (FS) Payloads ---
+export interface FSReadRequest {
+  scope: FSScope;
   path: string;
-  model: {
-    provider: string;
-    name: string;
-    temp: number;
-  };
-  contextFiles: string[];
+  agent_id?: string;
+}
+export interface FSWriteRequest extends FSReadRequest {
+  content: string;
+}
+export interface FSListRequest extends FSReadRequest {}
+
+export interface FSResponse {
+  status: 'success' | 'error';
+  content?: string;
+  files?: string[];
+  error?: string;
 }
 
-export interface ScheduleEntry {
-  id: string;
-  agent: string;
-  type: 'interval' | 'cron';
-  value: string | number; // seconds for interval, expression for cron
-  enabled: boolean;
+// --- Executor Payloads ---
+export interface SpawnRequest {
+  agent_id: string;
+  entrypoint: string;
+  env?: Record<string, string>;
+}
+export interface KillRequest {
+  agent_id: string;
+  signal?: 'SIGTERM' | 'SIGKILL';
 }
 
-export const SUBJECTS = {
-  RUNTIME: {
-    READY: 'runtime.ready'
-  },
-  AGENT: {
-    INBOX: (name: string) => `agent.${name}.inbox`,
-    READY: (name: string) => `agent.${name}.ready`
-  },
-  INGRESS: {
-    MESSAGE: 'ingress.ui.message',
-    COMMAND: 'ingress.ui.command'
-  },
-  EGRESS: {
-    RENDER: 'egress.ui.render',
-    NOTIFY: 'egress.ui.notify'
-  },
-  TOOL: {
-    SYSTEM: {
-      RELOAD: 'tool.system.reload'
-    },
-    FS: {
-      READ: 'tool.fs.read',
-      WRITE: 'tool.fs.write',
-      LIST: 'tool.fs.list',
-      PATCH: 'tool.fs.patch'
-    },
-    COGNITION: {
-      READ: 'tool.cognition.read',
-      WRITE: 'tool.cognition.write'
-    },
-    AGENT: {
-
-      LIST: 'tool.agent.list',
-      CREATE: 'tool.agent.create',
-      UPDATE: 'tool.agent.update',
-      ENABLE: 'tool.agent.enable',
-      DISABLE: 'tool.agent.disable',
-      MIND: {
-        READ: 'tool.agent.mind.read',
-        WRITE: 'tool.agent.mind.write'
-      }
-    },
-    SCHEDULE: {
-      LIST: 'tool.schedule.list',
-      CREATE: 'tool.schedule.create',
-      UPDATE: 'tool.schedule.update',
-      DELETE: 'tool.schedule.delete'
-    }
-  },
-  SERVICE: {
-    LLM: {
-      MODELS: {
-        LIST: 'service.llm.models.list'
-      },
-      PROVIDER: {
-        UPDATE: 'service.llm.provider.update'
-      },
-      INFERENCE: 'service.llm.inference'
-    }
-  }
-};
-
+// --- Inference Payloads ---
+export interface InferenceMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+export interface InferenceRequest {
+  model: string;
+  temperature: number;
+  messages: InferenceMessage[];
+}
+export interface InferenceResponse {
+  status: 'success' | 'error';
+  content?: string;
+  error?: string;
+}

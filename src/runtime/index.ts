@@ -1,687 +1,91 @@
+import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
-import { connect, NatsConnection, JSONCodec, Msg } from 'nats';
-import { fork, ChildProcess } from 'child_process';
-import { v4 as uuidv4 } from 'uuid';
-import * as cron from 'node-cron';
-import * as http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { Envelope, AgentConfig, ScheduleEntry, SUBJECTS } from '../types';
-import { LlmManager } from './LlmManager';
+import { connect } from 'nats';
+import { Hub } from '../hub/Hub';
+import { Librarian } from '../services/fs/Librarian';
 
-const DATA_ROOT = '/data';
-const SYSTEM_DIR = path.join(DATA_ROOT, 'system');
-const UI_DIR = path.join(DATA_ROOT, 'ui');
-const AGENTS_DIR = path.join(SYSTEM_DIR, 'agents');
-const SESSIONS_DIR = path.join(SYSTEM_DIR, 'sessions');
-const ARTIFACTS_DIR = path.join(DATA_ROOT, 'artifacts');
-const CACHE_DIR = path.join(DATA_ROOT, 'cache');
+const UI_DIR = '/data/ui';
 
-const jc = JSONCodec();
+async function bootstrap() {
+  console.log('Bootstrapping Rook v2.0 Service Mesh...');
 
-class RuntimeController {
-  private nc!: NatsConnection;
-  private agents: Map<string, AgentConfig> = new Map();
-  private workers: Map<string, ChildProcess> = new Map();
-  private schedules: ScheduleEntry[] = [];
-  private cronTasks: Map<string, cron.ScheduledTask> = new Map();
-  private intervalTasks: Map<string, NodeJS.Timeout> = new Map();
-  private bootTimestamp: number = Date.now();
-  private heartbeatInterval?: NodeJS.Timeout;
-  private llmManager!: LlmManager;
+  // Start the JetStream Hub
+  const hub = new Hub();
+  await hub.start();
 
-  async start() {
-    try {
-      console.log('Starting Rook v0 Runtime...');
-      this.validateDataMount();
-      this.ensureDirectories();
-      this.ensureDefaultFiles();
-      this.loadRuntimeConfig();
+  // Give the Hub a moment to create the streams before services try to use them
+  await new Promise(resolve => setTimeout(resolve, 1000));
 
-      const natsUrl = process.env.NATS_URL || 'nats://localhost:4222';
-      this.nc = await connect({ servers: natsUrl });
-      console.log(`Connected to NATS at ${natsUrl}`);
+  // Start the sovereign Librarian service
+  const librarian = new Librarian();
+  await librarian.start();
 
-      this.llmManager = new LlmManager(this.nc);
-      this.llmManager.setupHandlers();
+  // Temporary UI Host & WS Proxy to keep Cockpit alive
+  const port = parseInt(process.env.HTTP_PORT || '7070');
+  const server = http.createServer((req, res) => {
+    let urlPath = req.url === '/' ? '/index.html' : req.url!;
+    let filePath: string;
 
-      this.loadConfig();
-      this.setupToolHandlers();
-      this.setupIngressHandlers();
-      this.setupWatchers();
-      this.startScheduler();
-      this.spawnEnabledAgents();
-      this.startHeartbeat();
-      this.startHttpServer();
-
-      this.publish(SUBJECTS.RUNTIME.READY, {
-        id: uuidv4(),
-        ts: new Date().toISOString(),
-        type: 'RuntimeReady',
-        from: 'runtime',
-        to: SUBJECTS.RUNTIME.READY,
-        payload: { status: 'ready' }
-      });
-
-      console.log('Runtime ready.');
-    } catch (err) {
-      console.error('Boot failed:', err);
-      process.exit(1);
-    }
-  }
-
-  private loadRuntimeConfig() {
-    const runtimeConfigPath = path.join(SYSTEM_DIR, 'runtime.json');
-    if (fs.existsSync(runtimeConfigPath)) {
-      try {
-        const config = JSON.parse(fs.readFileSync(runtimeConfigPath, 'utf8'));
-        if (config.bootTimestamp) {
-          this.bootTimestamp = config.bootTimestamp;
-          console.log(`Resumed uptime from: ${new Date(this.bootTimestamp).toISOString()}`);
-        } else {
-          config.bootTimestamp = this.bootTimestamp;
-          this.safeWriteJson(runtimeConfigPath, config);
-        }
-      } catch (e) {
-        console.warn('Failed to parse runtime.json, resetting bootTimestamp');
-        this.safeWriteJson(runtimeConfigPath, { bootTimestamp: this.bootTimestamp, http_port: 7070, nats_port: 4222 });
-      }
+    if (urlPath.startsWith('/data')) {
+      filePath = path.join('/', urlPath);
     } else {
-      this.safeWriteJson(runtimeConfigPath, { bootTimestamp: this.bootTimestamp, http_port: 7070, nats_port: 4222 });
+      filePath = path.join(UI_DIR, urlPath);
     }
-  }
 
-  private startHeartbeat() {
-    this.heartbeatInterval = setInterval(() => {
-      const uptime = Math.floor((Date.now() - this.bootTimestamp) / 1000);
-      const agentsActive = Array.from(this.workers.keys()).length;
-      
-      this.publish('egress.ui.heartbeat', {
-        id: uuidv4(),
-        ts: new Date().toISOString(),
-        type: 'Heartbeat',
-        from: 'runtime',
-        to: 'egress.ui.heartbeat',
-        payload: {
-          status: 'nominal',
-          uptime,
-          lastBoot: new Date(this.bootTimestamp).toISOString(),
-          agentsActive
-        }
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      const ext = path.extname(filePath).toLowerCase();
+      let contentType = 'text/plain';
+      if (ext === '.html') contentType = 'text/html';
+      else if (ext === '.js') contentType = 'application/javascript';
+      else if (ext === '.json') contentType = 'application/json';
+      else if (ext === '.css') contentType = 'text/css';
+      else if (ext === '.svg') contentType = 'image/svg+xml';
+
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+        'Surrogate-Control': 'no-store'
       });
-    }, 5000);
-  }
-
-  private validateDataMount() {
-    if (!fs.existsSync(DATA_ROOT)) {
-      throw new Error(`/data mount not found!`);
+      fs.createReadStream(filePath).pipe(res);
+    } else {
+      res.writeHead(404);
+      res.end('Not Found');
     }
-  }
+  });
 
-  private ensureDirectories() {
-    [SYSTEM_DIR, UI_DIR, AGENTS_DIR, SESSIONS_DIR, ARTIFACTS_DIR, CACHE_DIR].forEach(dir => {
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-        console.log(`Created directory: ${dir}`);
-      }
-    });
-  }
+  const wss = new WebSocketServer({ noServer: true });
 
-  private ensureDefaultFiles() {
-    const defaults = {
-      'system.json': {},
-      'runtime.json': { http_port: 7070, nats_port: 4222, bootTimestamp: Date.now() },
-      'agents.json': [],
-      'routing.json': {},
-      'schedules.json': []
-    };
+  server.on('upgrade', (request, socket, head) => {
+    const pathname = new URL(request.url!, `http://${request.headers.host}`).pathname;
 
-    Object.entries(defaults).forEach(([file, content]) => {
-      const filePath = path.join(SYSTEM_DIR, file);
-      if (!fs.existsSync(filePath)) {
-        fs.writeFileSync(filePath, JSON.stringify(content, null, 2));
-        console.log(`Created default file: ${filePath}`);
-      }
-    });
-  }
+    if (pathname === '/_/nats') {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        const net = require('net');
+        const natsSocket = net.connect(4222, 'localhost', () => {
+          ws.on('message', (data: Buffer) => natsSocket.write(data));
+          natsSocket.on('data', (data: Buffer) => ws.send(data));
+        });
 
-  private loadConfig() {
-    const agentsPath = path.join(SYSTEM_DIR, 'agents.json');
-    if (fs.existsSync(agentsPath)) {
-      const agentList: AgentConfig[] = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
-      this.agents.clear();
-      agentList.forEach(a => {
-        if (!a.model) a.model = { provider: 'openai', name: 'gpt-4o', temp: 0.7 };
-        if (!a.contextFiles) a.contextFiles = [];
-        this.agents.set(a.name, a);
+        ws.on('close', () => natsSocket.end());
+        natsSocket.on('close', () => ws.close());
+        natsSocket.on('error', () => ws.close());
+        ws.on('error', () => natsSocket.end());
       });
+    } else {
+      socket.destroy();
     }
+  });
 
-    const schedulesPath = path.join(SYSTEM_DIR, 'schedules.json');
-    if (fs.existsSync(schedulesPath)) {
-      this.schedules = JSON.parse(fs.readFileSync(schedulesPath, 'utf8'));
-    }
-  }
-
-  private setupWatchers() {
-    fs.watch(SYSTEM_DIR, (eventType, filename) => {
-      if (filename && filename.endsWith('.json') && !filename.endsWith('.tmp') && filename !== 'runtime.json') {
-        console.log(`System state updated on disk (${filename}). Reloading config...`);
-        this.loadConfig();
-        this.updateScheduler();
-      }
-    });
-
-    fs.watch(UI_DIR, (eventType, filename) => {
-      if (filename) {
-        console.log(`UI asset updated on disk (${filename}).`);
-      }
-    });
-  }
-
-  private publish(subject: string, envelope: Envelope) {
-    this.nc.publish(subject, jc.encode(envelope));
-  }
-
-  private setupToolHandlers() {
-    this.nc.subscribe('tool.system.>', {
-      callback: (err, msg) => {
-        if (err) return;
-        const envelope = jc.decode(msg.data) as Envelope;
-        const subject = msg.subject;
-        let result: any;
-
-        try {
-          switch (subject) {
-            case SUBJECTS.TOOL.SYSTEM.RELOAD:
-              this.loadConfig(); // Reloads agents.json and schedules.json
-              // Also discover manual agent folders
-              const dirs = fs.readdirSync(AGENTS_DIR);
-              for (const dir of dirs) {
-                const stat = fs.statSync(path.join(AGENTS_DIR, dir));
-                if (stat.isDirectory()) {
-                  const profilePath = path.join(AGENTS_DIR, dir, 'profile.json');
-                  if (fs.existsSync(profilePath)) {
-                    try {
-                      const profile = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
-                      if (!this.agents.has(profile.name)) {
-                        this.agents.set(profile.name, profile);
-                        this.agentsDirty = true;
-                      }
-                    } catch(e) {}
-                  }
-                }
-              }
-              this.flushAgents();
-              result = { status: 'success' };
-              break;
-          }
-        } catch (e: any) {
-          result = { error: e.message };
-        }
-
-        msg.respond(jc.encode({
-          id: uuidv4(),
-          ts: new Date().toISOString(),
-          type: 'ToolResult',
-          from: 'runtime',
-          to: msg.reply || '',
-          correlation_id: envelope.id,
-          payload: result
-        }));
-      }
-    });
-
-    this.nc.subscribe('tool.fs.>', {
-      callback: (err, msg) => {
-        if (err) return;
-        const envelope = jc.decode(msg.data) as Envelope;
-        const subject = msg.subject;
-        let result: any;
-
-        try {
-          const { path: filePath, content } = envelope.payload;
-          const safePath = path.resolve(DATA_ROOT, filePath.startsWith('/') ? filePath.slice(1) : filePath);
-          
-          if (!safePath.startsWith(DATA_ROOT)) throw new Error('Path traversal detected');
-
-          switch (subject) {
-            case SUBJECTS.TOOL.FS.READ:
-              result = fs.readFileSync(safePath, 'utf8');
-              break;
-            case SUBJECTS.TOOL.FS.WRITE:
-              this.safeWriteFile(safePath, content);
-              result = { status: 'success' };
-              break;
-            case SUBJECTS.TOOL.FS.LIST:
-              result = fs.readdirSync(safePath);
-              break;
-          }
-        } catch (e: any) {
-          result = { error: e.message };
-        }
-
-        msg.respond(jc.encode({
-          id: uuidv4(),
-          ts: new Date().toISOString(),
-          type: 'ToolResult',
-          from: 'runtime',
-          to: msg.reply || '',
-          correlation_id: envelope.id,
-          payload: result
-        }));
-      }
-    });
-
-    this.nc.subscribe('tool.cognition.>', {
-      callback: (err, msg) => {
-        if (err) return;
-        const envelope = jc.decode(msg.data) as Envelope;
-        const subject = msg.subject;
-        let result: any;
-
-        try {
-          const agentName = envelope.from.replace('agent:', '');
-          if (!agentName || agentName === envelope.from) {
-             throw new Error('Agent name could not be inferred from sender');
-          }
-
-          const { path: reqPath, content } = envelope.payload;
-          
-          if (!reqPath || reqPath.includes('..') || reqPath.startsWith('/')) {
-            throw new Error('Invalid or traversal path detected');
-          }
-
-          const safePath = path.join(AGENTS_DIR, agentName, reqPath);
-          if (!safePath.startsWith(path.join(AGENTS_DIR, agentName))) {
-            throw new Error('Path traversal detected');
-          }
-
-          switch (subject) {
-            case SUBJECTS.TOOL.COGNITION.READ:
-              if (fs.existsSync(safePath)) {
-                result = fs.readFileSync(safePath, 'utf8');
-              } else {
-                result = { error: 'File not found' };
-              }
-              break;
-            case SUBJECTS.TOOL.COGNITION.WRITE:
-              this.safeWriteFile(safePath, content);
-              result = { status: 'success' };
-              break;
-            default:
-              throw new Error('Unknown cognition subject');
-          }
-        } catch (e: any) {
-          result = { error: e.message };
-        }
-
-        msg.respond(jc.encode({
-          id: uuidv4(),
-          ts: new Date().toISOString(),
-          type: 'ToolResult',
-          from: 'runtime',
-          to: msg.reply || '',
-          correlation_id: envelope.id,
-          payload: result
-        }));
-      }
-    });
-
-    this.nc.subscribe('tool.agent.>', {
-      callback: (err, msg) => {
-        if (err) return;
-        const envelope = jc.decode(msg.data) as Envelope;
-        const subject = msg.subject;
-        let result: any;
-
-        try {
-          switch (subject) {
-            case SUBJECTS.TOOL.AGENT.LIST:
-              result = Array.from(this.agents.values()).map(a => ({
-                ...a,
-                isRunning: this.workers.has(a.name)
-              }));
-              break;
-            case SUBJECTS.TOOL.AGENT.CREATE:
-              const newAgent = envelope.payload as AgentConfig;
-              if (!newAgent.model) newAgent.model = { provider: 'openai', name: 'gpt-4o', temp: 0.7 };
-              if (!newAgent.contextFiles) newAgent.contextFiles = [];
-              this.agents.set(newAgent.name, newAgent);
-              this.saveAgents();
-              this.materializeAgentFolder(newAgent.name);
-              if (newAgent.enabled) this.spawnAgent(newAgent);
-              result = { status: 'success' };
-              break;
-            case SUBJECTS.TOOL.AGENT.ENABLE:
-              const agentToEnable = this.agents.get(envelope.payload.name);
-              if (agentToEnable) {
-                agentToEnable.enabled = true;
-                this.saveAgents();
-                this.spawnAgent(agentToEnable);
-                result = { status: 'success' };
-              }
-              break;
-            case SUBJECTS.TOOL.AGENT.DISABLE:
-              const agentToDisable = this.agents.get(envelope.payload.name);
-              if (agentToDisable) {
-                agentToDisable.enabled = false;
-                this.saveAgents();
-                this.stopAgent(agentToDisable.name);
-                result = { status: 'success' };
-              }
-              break;
-            case 'tool.agent.delete':
-              const nameToDelete = envelope.payload.name;
-              this.stopAgent(nameToDelete);
-              this.agents.delete(nameToDelete);
-              this.saveAgents();
-              result = { status: 'success' };
-              break;
-            case SUBJECTS.TOOL.AGENT.MIND.READ:
-              const agentToRead = this.agents.get(envelope.payload.name);
-              if (!agentToRead) throw new Error('Agent not found');
-              const files: { [path: string]: string } = {};
-              for (const relPath of agentToRead.contextFiles) {
-                const fullPath = path.join(agentToRead.path, relPath);
-                if (fs.existsSync(fullPath)) {
-                  files[relPath] = fs.readFileSync(fullPath, 'utf8');
-                } else {
-                  files[relPath] = '';
-                }
-              }
-              result = { files };
-              break;
-            case SUBJECTS.TOOL.AGENT.MIND.WRITE:
-              const agentToWrite = this.agents.get(envelope.payload.name);
-              if (!agentToWrite) throw new Error('Agent not found');
-              
-              // 1. Write provided file contents
-              if (envelope.payload.files) {
-                for (const [relPath, content] of Object.entries(envelope.payload.files)) {
-                  const fullPath = path.join(agentToWrite.path, relPath as string);
-                  this.safeWriteFile(fullPath, content as string);
-                }
-              }
-
-              // 2. Update config
-              if (envelope.payload.model) agentToWrite.model = envelope.payload.model;
-              if (envelope.payload.contextFiles) agentToWrite.contextFiles = envelope.payload.contextFiles;
-              this.saveAgents();
-
-              // 3. Restart if enabled
-              if (agentToWrite.enabled) {
-                this.stopAgent(agentToWrite.name);
-                this.spawnAgent(agentToWrite);
-              }
-              
-              result = { status: 'success' };
-              break;
-          }
-        } catch (e: any) {
-          result = { error: e.message };
-        }
-
-        msg.respond(jc.encode({
-          id: uuidv4(),
-          ts: new Date().toISOString(),
-          type: 'ToolResult',
-          from: 'runtime',
-          to: msg.reply || '',
-          correlation_id: envelope.id,
-          payload: result
-        }));
-      }
-    });
-
-    this.nc.subscribe('tool.schedule.>', {
-      callback: (err, msg) => {
-        if (err) return;
-        const envelope = jc.decode(msg.data) as Envelope;
-        const subject = msg.subject;
-        let result: any;
-
-        try {
-          switch (subject) {
-            case SUBJECTS.TOOL.SCHEDULE.LIST:
-              result = this.schedules;
-              break;
-            case SUBJECTS.TOOL.SCHEDULE.CREATE:
-              const newSchedule = envelope.payload as ScheduleEntry;
-              this.schedules.push(newSchedule);
-              this.saveSchedules();
-              this.updateScheduler();
-              result = { status: 'success' };
-              break;
-          }
-        } catch (e: any) {
-          result = { error: e.message };
-        }
-
-        msg.respond(jc.encode({
-          id: uuidv4(),
-          ts: new Date().toISOString(),
-          type: 'ToolResult',
-          from: 'runtime',
-          to: msg.reply || '',
-          correlation_id: envelope.id,
-          payload: result
-        }));
-      }
-    });
-  }
-
-  private setupIngressHandlers() {
-    this.nc.subscribe(SUBJECTS.INGRESS.MESSAGE, {
-      callback: (err, msg) => {
-        if (err) return;
-        const envelope = jc.decode(msg.data) as Envelope;
-        if (envelope.agent) {
-          this.publish(SUBJECTS.AGENT.INBOX(envelope.agent), envelope);
-        }
-      }
-    });
-  }
-
-  private startScheduler() {
-    this.updateScheduler();
-  }
-
-  private updateScheduler() {
-    // Clear existing
-    this.cronTasks.forEach(t => t.stop());
-    this.cronTasks.clear();
-    this.intervalTasks.forEach(t => clearInterval(t));
-    this.intervalTasks.clear();
-
-    this.schedules.filter(s => s.enabled).forEach(s => {
-      if (s.type === 'cron') {
-        const task = cron.schedule(s.value as string, () => {
-          this.publish(SUBJECTS.AGENT.INBOX(s.agent), {
-            id: uuidv4(),
-            ts: new Date().toISOString(),
-            type: 'CronFire',
-            from: 'runtime',
-            to: SUBJECTS.AGENT.INBOX(s.agent),
-            agent: s.agent,
-            payload: { schedule_id: s.id }
-          });
-        });
-        this.cronTasks.set(s.id, task);
-      } else if (s.type === 'interval') {
-        const interval = setInterval(() => {
-          this.publish(SUBJECTS.AGENT.INBOX(s.agent), {
-            id: uuidv4(),
-            ts: new Date().toISOString(),
-            type: 'Tick',
-            from: 'runtime',
-            to: SUBJECTS.AGENT.INBOX(s.agent),
-            agent: s.agent,
-            payload: { schedule_id: s.id }
-          });
-        }, (s.value as number) * 1000);
-        this.intervalTasks.set(s.id, interval);
-      }
-    });
-  }
-
-  private spawnEnabledAgents() {
-    this.agents.forEach(agent => {
-      if (agent.enabled) {
-        this.spawnAgent(agent);
-      }
-    });
-  }
-
-  private spawnAgent(agent: AgentConfig) {
-    if (this.workers.has(agent.name)) return;
-    
-    console.log(`Spawning agent worker: ${agent.name}`);
-    const worker = fork(path.join(__dirname, '../agent/worker.ts'), [], {
-      execArgv: ['-r', 'ts-node/register'],
-      env: { ...process.env, AGENT_NAME: agent.name }
-    });
-
-    worker.on('exit', (code) => {
-      console.log(`Agent worker ${agent.name} exited with code ${code}`);
-      this.workers.delete(agent.name);
-    });
-
-    this.workers.set(agent.name, worker);
-  }
-
-  private stopAgent(name: string) {
-    const worker = this.workers.get(name);
-    if (worker) {
-      worker.kill();
-      this.workers.delete(name);
-    }
-  }
-
-  private agentsDirty: boolean = false;
-
-  private saveAgents() {
-    this.agentsDirty = true;
-    this.flushAgents();
-  }
-
-  private flushAgents() {
-    if (!this.agentsDirty) return;
-    this.safeWriteJson(path.join(SYSTEM_DIR, 'agents.json'), Array.from(this.agents.values()));
-    for (const agent of this.agents.values()) {
-      const profilePath = path.join(AGENTS_DIR, agent.name, 'profile.json');
-      if (fs.existsSync(path.dirname(profilePath))) {
-        this.safeWriteJson(profilePath, agent);
-      }
-    }
-    this.agentsDirty = false;
-  }
-
-
-  private saveSchedules() {
-    this.safeWriteJson(path.join(SYSTEM_DIR, 'schedules.json'), this.schedules);
-  }
-
-  private safeWriteJson(filePath: string, data: any) {
-    this.safeWriteFile(filePath, JSON.stringify(data, null, 2));
-  }
-
-  private safeWriteFile(filePath: string, content: string | Buffer) {
-    const tempPath = `${filePath}.tmp`;
-    try {
-      if (!fs.existsSync(path.dirname(filePath))) {
-        fs.mkdirSync(path.dirname(filePath), { recursive: true });
-      }
-      fs.writeFileSync(tempPath, content);
-      fs.renameSync(tempPath, filePath);
-    } catch (err) {
-      console.error(`Failed to atomically write file to ${filePath}:`, err);
-      if (fs.existsSync(tempPath)) {
-        try { fs.unlinkSync(tempPath); } catch (e) {}
-      }
-      throw err;
-    }
-  }
-
-  private materializeAgentFolder(name: string) {
-    const agentDir = path.join(AGENTS_DIR, name);
-    const personaDir = path.join(agentDir, 'persona');
-    const memoryDir = path.join(agentDir, 'memory');
-
-    [agentDir, personaDir, memoryDir].forEach(dir => {
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    });
-
-    this.safeWriteJson(path.join(agentDir, 'profile.json'), { name });
-  }
-
-  private startHttpServer() {
-    const port = parseInt(process.env.HTTP_PORT || '7070');
-    const server = http.createServer((req, res) => {
-      let urlPath = req.url === '/' ? '/index.html' : req.url!;
-      let filePath: string;
-
-      if (urlPath.startsWith('/data')) {
-        filePath = path.join('/', urlPath);
-      } else {
-        filePath = path.join(UI_DIR, urlPath);
-      }
-
-      if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-        const ext = path.extname(filePath).toLowerCase();
-        let contentType = 'text/plain';
-        if (ext === '.html') contentType = 'text/html';
-        else if (ext === '.js') contentType = 'application/javascript';
-        else if (ext === '.json') contentType = 'application/json';
-        else if (ext === '.css') contentType = 'text/css';
-        else if (ext === '.svg') contentType = 'image/svg+xml';
-
-        res.writeHead(200, {
-          'Content-Type': contentType,
-          'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
-          'Pragma': 'no-cache',
-          'Expires': '0',
-          'Surrogate-Control': 'no-store'
-        });
-        fs.createReadStream(filePath).pipe(res);
-      } else {
-        res.writeHead(404);
-        res.end('Not Found');
-      }
-    });
-
-    const wss = new WebSocketServer({ noServer: true });
-
-    server.on('upgrade', (request, socket, head) => {
-      const pathname = new URL(request.url!, `http://${request.headers.host}`).pathname;
-
-      if (pathname === '/_/nats') {
-        wss.handleUpgrade(request, socket, head, (ws) => {
-          this.handleWsBridge(ws);
-        });
-      } else {
-        socket.destroy();
-      }
-    });
-
-    server.listen(port, () => {
-      console.log(`HTTP Server + WS Bridge listening on port ${port}`);
-    });
-  }
-
-  private handleWsBridge(ws: WebSocket) {
-    const net = require('net');
-    const natsSocket = net.connect(4222, 'localhost', () => {
-      ws.on('message', (data: Buffer) => natsSocket.write(data));
-      natsSocket.on('data', (data: Buffer) => ws.send(data));
-    });
-
-    ws.on('close', () => natsSocket.end());
-    natsSocket.on('close', () => ws.close());
-    natsSocket.on('error', () => ws.close());
-    ws.on('error', () => natsSocket.end());
-  }
+  server.listen(port, () => {
+    console.log(`[Stub] HTTP Server + WS Bridge listening on port ${port}`);
+  });
 }
 
-const runtime = new RuntimeController();
-runtime.start();
+bootstrap().catch(err => {
+  console.error('Fatal bootstrap error:', err);
+  process.exit(1);
+});
