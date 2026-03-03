@@ -1,29 +1,70 @@
 import { connect, NatsConnection, JSONCodec, Msg } from 'nats';
 import { v4 as uuidv4 } from 'uuid';
-import { Envelope, SUBJECTS } from '../types';
+import { Envelope, SUBJECTS, AgentConfig } from '../types';
 
 const jc = JSONCodec();
-const agentName = process.env.AGENT_NAME!;
 
-class AgentWorker {
+export class Agent {
   private nc!: NatsConnection;
+  private name: string;
+  private config!: AgentConfig;
+  private contextData: Record<string, string> = {};
+
+  constructor(name: string) {
+    this.name = name;
+  }
 
   async start() {
     try {
       const natsUrl = process.env.NATS_URL || 'nats://localhost:4222';
       this.nc = await connect({ servers: natsUrl });
-      console.log(`Agent ${agentName} connected to NATS`);
+      console.log(`Agent ${this.name} connected to NATS`);
+
+      await this.initialize();
 
       this.subscribeToInbox();
       this.signalReady();
     } catch (err) {
-      console.error(`Agent ${agentName} failed to start:`, err);
+      console.error(`Agent ${this.name} failed to start:`, err);
       process.exit(1);
     }
   }
 
+  private async initialize() {
+    // 1. Request profile.json via cognition
+    const profileRes = await this.requestTool(SUBJECTS.TOOL.COGNITION.READ, { path: 'profile.json' });
+    if (profileRes && profileRes.error) {
+       console.warn(`Agent ${this.name} profile.json not found or error: ${profileRes.error}`);
+       this.config = { name: this.name, enabled: true, id: this.name, inbox: SUBJECTS.AGENT.INBOX(this.name), path: '', contextFiles: [], model: { provider: 'openai', name: 'gpt-4o', temp: 0.7 } };
+    } else {
+       this.config = typeof profileRes === 'string' ? JSON.parse(profileRes) : profileRes;
+    }
+
+    // 2. Iterate through contextFiles and pull content
+    if (this.config.contextFiles && Array.isArray(this.config.contextFiles)) {
+      for (const file of this.config.contextFiles) {
+        const fileRes = await this.requestTool(SUBJECTS.TOOL.COGNITION.READ, { path: file });
+        if (fileRes && !fileRes.error) {
+          this.contextData[file] = typeof fileRes === 'string' ? fileRes : JSON.stringify(fileRes);
+        } else {
+          // File missing, create it
+          await this.requestTool(SUBJECTS.TOOL.COGNITION.WRITE, { path: file, content: '' });
+          this.contextData[file] = '';
+        }
+      }
+    }
+
+    // Verify model availability via LLM Broker
+    try {
+      const modelsRes = await this.requestTool(SUBJECTS.SERVICE.LLM.MODELS.LIST, {});
+      console.log(`Agent ${this.name} verified models:`, modelsRes.models);
+    } catch (e) {
+      console.warn(`Agent ${this.name} could not verify models.`);
+    }
+  }
+
   private subscribeToInbox() {
-    const subject = SUBJECTS.AGENT.INBOX(agentName);
+    const subject = SUBJECTS.AGENT.INBOX(this.name);
     this.nc.subscribe(subject, {
       callback: async (err, msg) => {
         if (err) return;
@@ -34,93 +75,71 @@ class AgentWorker {
   }
 
   private signalReady() {
-    this.publish(SUBJECTS.AGENT.READY(agentName), {
+    this.publish(SUBJECTS.AGENT.READY(this.name), {
       id: uuidv4(),
       ts: new Date().toISOString(),
       type: 'AgentReady',
-      from: `agent:${agentName}`,
-      to: SUBJECTS.AGENT.READY(agentName),
-      agent: agentName,
+      from: `agent:${this.name}`,
+      to: SUBJECTS.AGENT.READY(this.name),
+      agent: this.name,
       payload: { status: 'ready' }
     });
   }
 
   private async handleMessage(envelope: Envelope) {
-    console.log(`Agent ${agentName} received message:`, envelope.type);
+    console.log(`Agent ${this.name} reasoning cycle triggered by:`, envelope.type);
 
     try {
-      // 1) Validate envelope (implicitly done by decoding)
+      // Execute reasoning step
+      const output = await this.reasoningCycle(envelope);
 
-      // 2) Hydrate agent context
-      const context = await this.hydrateContext(envelope);
-
-      // 3) Execute reasoning step (Placeholder Brain)
-      const output = await this.placeholderBrain(context, envelope);
-
-      // 4) If tool call requested (demonstrated in placeholder brain)
-
-      // 5) If output generated
       if (output) {
         this.publish(SUBJECTS.EGRESS.RENDER, {
           id: uuidv4(),
           ts: new Date().toISOString(),
           type: 'AgentOutput',
-          from: `agent:${agentName}`,
+          from: `agent:${this.name}`,
           to: SUBJECTS.EGRESS.RENDER,
-          agent: agentName,
+          agent: this.name,
           payload: { text: output }
         });
       }
-
-      // 6) Persist memory updates (demonstrated in placeholder brain)
 
     } catch (e: any) {
       this.publish(SUBJECTS.EGRESS.NOTIFY, {
         id: uuidv4(),
         ts: new Date().toISOString(),
         type: 'AgentOutput',
-        from: `agent:${agentName}`,
+        from: `agent:${this.name}`,
         to: SUBJECTS.EGRESS.NOTIFY,
-        agent: agentName,
+        agent: this.name,
         payload: { error: e.message }
       });
     }
   }
 
-  private async hydrateContext(envelope: Envelope) {
-    // Assembly order: persona, principles, schemas, memory, session, message
-    const files = [
-      `system/agents/${agentName}/persona/persona.md`,
-      `system/agents/${agentName}/persona/principles.md`,
-      `system/agents/${agentName}/memory/scratch.md`
-    ];
-
-    const contextParts = await Promise.all(files.map(async f => {
-      const res = await this.requestTool(SUBJECTS.TOOL.FS.READ, { path: f });
-      return typeof res === 'string' ? res : JSON.stringify(res);
-    }));
-
-    return {
-      persona: contextParts[0],
-      principles: contextParts[1],
-      memory: contextParts[2],
-      message: envelope.payload
-    };
-  }
-
-  private async placeholderBrain(context: any, envelope: Envelope) {
-    const input = envelope.payload.text || '';
-    let response = `Hello! I am agent ${agentName}. I received: "${input}"`;
-
-    // Demonstrate a tool call: append to scratch.md
-    const scratchPath = `system/agents/${agentName}/memory/scratch.md`;
-    const currentMemory = context.memory;
-    const newMemory = currentMemory + `
-- Received message at ${new Date().toISOString()}: ${input}`;
+  private async reasoningCycle(envelope: Envelope) {
+    const input = envelope.payload.text || 'Tick';
     
-    await this.requestTool(SUBJECTS.TOOL.FS.WRITE, { path: scratchPath, content: newMemory });
+    // Assemble mind context
+    let mindContext = '';
+    for (const [file, content] of Object.entries(this.contextData)) {
+      mindContext += `\n--- ${file} ---\n${content}\n`;
+    }
+
+    // Call inference service
+    const prompt = `Context:\n${mindContext}\n\nInput: ${input}`;
     
-    return response + ` (Updated my memory!)`;
+    const inferenceRes = await this.requestTool(SUBJECTS.SERVICE.LLM.INFERENCE, {
+      model: this.config.model,
+      prompt
+    });
+
+    if (inferenceRes.error) {
+      return `[Agent ${this.name}] Inference Error: ${inferenceRes.error}`;
+    }
+
+    return `[Agent ${this.name}] Processed input: "${input}". Response: ${inferenceRes.text || 'Ack'}`;
   }
 
   private async requestTool(subject: string, payload: any) {
@@ -128,7 +147,7 @@ class AgentWorker {
       id: uuidv4(),
       ts: new Date().toISOString(),
       type: 'ToolRequest',
-      from: `agent:${agentName}`,
+      from: `agent:${this.name}`,
       to: subject,
       payload
     };
@@ -143,5 +162,14 @@ class AgentWorker {
   }
 }
 
-const worker = new AgentWorker();
-worker.start();
+// Only auto-start if run directly
+if (require.main === module) {
+  const name = process.env.AGENT_NAME;
+  if (name) {
+    const worker = new Agent(name);
+    worker.start();
+  } else {
+    console.error("AGENT_NAME environment variable is required");
+    process.exit(1);
+  }
+}

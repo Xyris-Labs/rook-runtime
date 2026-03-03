@@ -49,13 +49,21 @@ export const SUBJECTS = {
     NOTIFY: 'egress.ui.notify'
   },
   TOOL: {
+    SYSTEM: {
+      RELOAD: 'tool.system.reload'
+    },
     FS: {
       READ: 'tool.fs.read',
       WRITE: 'tool.fs.write',
       LIST: 'tool.fs.list',
       PATCH: 'tool.fs.patch'
     },
+    COGNITION: {
+      READ: 'tool.cognition.read',
+      WRITE: 'tool.cognition.write'
+    },
     AGENT: {
+
       LIST: 'tool.agent.list',
       CREATE: 'tool.agent.create',
       UPDATE: 'tool.agent.update',
@@ -72,5 +80,17 @@ export const SUBJECTS = {
       UPDATE: 'tool.schedule.update',
       DELETE: 'tool.schedule.delete'
     }
+  },
+  SERVICE: {
+    LLM: {
+      MODELS: {
+        LIST: 'service.llm.models.list'
+      },
+      PROVIDER: {
+        UPDATE: 'service.llm.provider.update'
+      },
+      INFERENCE: 'service.llm.inference'
+    }
   }
 };
+

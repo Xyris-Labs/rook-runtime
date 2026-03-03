@@ -7,6 +7,7 @@ import * as cron from 'node-cron';
 import * as http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Envelope, AgentConfig, ScheduleEntry, SUBJECTS } from '../types';
+import { LlmManager } from './LlmManager';
 
 const DATA_ROOT = '/data';
 const SYSTEM_DIR = path.join(DATA_ROOT, 'system');
@@ -27,6 +28,7 @@ class RuntimeController {
   private intervalTasks: Map<string, NodeJS.Timeout> = new Map();
   private bootTimestamp: number = Date.now();
   private heartbeatInterval?: NodeJS.Timeout;
+  private llmManager!: LlmManager;
 
   async start() {
     try {
@@ -39,6 +41,9 @@ class RuntimeController {
       const natsUrl = process.env.NATS_URL || 'nats://localhost:4222';
       this.nc = await connect({ servers: natsUrl });
       console.log(`Connected to NATS at ${natsUrl}`);
+
+      this.llmManager = new LlmManager(this.nc);
+      this.llmManager.setupHandlers();
 
       this.loadConfig();
       this.setupToolHandlers();
@@ -179,7 +184,55 @@ class RuntimeController {
   }
 
   private setupToolHandlers() {
-    this.nc.subscribe('tool.fs.*', {
+    this.nc.subscribe('tool.system.>', {
+      callback: (err, msg) => {
+        if (err) return;
+        const envelope = jc.decode(msg.data) as Envelope;
+        const subject = msg.subject;
+        let result: any;
+
+        try {
+          switch (subject) {
+            case SUBJECTS.TOOL.SYSTEM.RELOAD:
+              this.loadConfig(); // Reloads agents.json and schedules.json
+              // Also discover manual agent folders
+              const dirs = fs.readdirSync(AGENTS_DIR);
+              for (const dir of dirs) {
+                const stat = fs.statSync(path.join(AGENTS_DIR, dir));
+                if (stat.isDirectory()) {
+                  const profilePath = path.join(AGENTS_DIR, dir, 'profile.json');
+                  if (fs.existsSync(profilePath)) {
+                    try {
+                      const profile = JSON.parse(fs.readFileSync(profilePath, 'utf8'));
+                      if (!this.agents.has(profile.name)) {
+                        this.agents.set(profile.name, profile);
+                        this.agentsDirty = true;
+                      }
+                    } catch(e) {}
+                  }
+                }
+              }
+              this.flushAgents();
+              result = { status: 'success' };
+              break;
+          }
+        } catch (e: any) {
+          result = { error: e.message };
+        }
+
+        msg.respond(jc.encode({
+          id: uuidv4(),
+          ts: new Date().toISOString(),
+          type: 'ToolResult',
+          from: 'runtime',
+          to: msg.reply || '',
+          correlation_id: envelope.id,
+          payload: result
+        }));
+      }
+    });
+
+    this.nc.subscribe('tool.fs.>', {
       callback: (err, msg) => {
         if (err) return;
         const envelope = jc.decode(msg.data) as Envelope;
@@ -220,7 +273,62 @@ class RuntimeController {
       }
     });
 
-    this.nc.subscribe('tool.agent.*', {
+    this.nc.subscribe('tool.cognition.>', {
+      callback: (err, msg) => {
+        if (err) return;
+        const envelope = jc.decode(msg.data) as Envelope;
+        const subject = msg.subject;
+        let result: any;
+
+        try {
+          const agentName = envelope.from.replace('agent:', '');
+          if (!agentName || agentName === envelope.from) {
+             throw new Error('Agent name could not be inferred from sender');
+          }
+
+          const { path: reqPath, content } = envelope.payload;
+          
+          if (!reqPath || reqPath.includes('..') || reqPath.startsWith('/')) {
+            throw new Error('Invalid or traversal path detected');
+          }
+
+          const safePath = path.join(AGENTS_DIR, agentName, reqPath);
+          if (!safePath.startsWith(path.join(AGENTS_DIR, agentName))) {
+            throw new Error('Path traversal detected');
+          }
+
+          switch (subject) {
+            case SUBJECTS.TOOL.COGNITION.READ:
+              if (fs.existsSync(safePath)) {
+                result = fs.readFileSync(safePath, 'utf8');
+              } else {
+                result = { error: 'File not found' };
+              }
+              break;
+            case SUBJECTS.TOOL.COGNITION.WRITE:
+              this.safeWriteFile(safePath, content);
+              result = { status: 'success' };
+              break;
+            default:
+              throw new Error('Unknown cognition subject');
+          }
+        } catch (e: any) {
+          result = { error: e.message };
+        }
+
+        msg.respond(jc.encode({
+          id: uuidv4(),
+          ts: new Date().toISOString(),
+          type: 'ToolResult',
+          from: 'runtime',
+          to: msg.reply || '',
+          correlation_id: envelope.id,
+          payload: result
+        }));
+      }
+    });
+
+    this.nc.subscribe('tool.agent.>', {
       callback: (err, msg) => {
         if (err) return;
         const envelope = jc.decode(msg.data) as Envelope;
@@ -326,7 +434,7 @@ class RuntimeController {
       }
     });
 
-    this.nc.subscribe('tool.schedule.*', {
+    this.nc.subscribe('tool.schedule.>', {
       callback: (err, msg) => {
         if (err) return;
         const envelope = jc.decode(msg.data) as Envelope;
@@ -450,9 +558,25 @@ class RuntimeController {
     }
   }
 
+  private agentsDirty: boolean = false;
+
   private saveAgents() {
-    this.safeWriteJson(path.join(SYSTEM_DIR, 'agents.json'), Array.from(this.agents.values()));
+    this.agentsDirty = true;
+    this.flushAgents();
   }
+
+  private flushAgents() {
+    if (!this.agentsDirty) return;
+    this.safeWriteJson(path.join(SYSTEM_DIR, 'agents.json'), Array.from(this.agents.values()));
+    for (const agent of this.agents.values()) {
+      const profilePath = path.join(AGENTS_DIR, agent.name, 'profile.json');
+      if (fs.existsSync(path.dirname(profilePath))) {
+        this.safeWriteJson(profilePath, agent);
+      }
+    }
+    this.agentsDirty = false;
+  }
+
 
   private saveSchedules() {
     this.safeWriteJson(path.join(SYSTEM_DIR, 'schedules.json'), this.schedules);
