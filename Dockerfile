@@ -14,6 +14,7 @@ RUN npm install
 
 # Copy source code
 COPY src ./src
+COPY nats.conf ./
 COPY entrypoint.sh ./
 
 RUN chmod +x entrypoint.sh
@@ -26,6 +27,6 @@ ENV HTTP_PORT=7070
 VOLUME /data
 
 # Ports
-EXPOSE 7070 4222
+EXPOSE 7070 4222 8080
 
 ENTRYPOINT ["./entrypoint.sh"]

@@ -2,7 +2,7 @@
 set -e
 
 # Start NATS server in the background
-nats-server -js -p 4222 &
+nats-server -c nats.conf -p 4222 &
 
 # Wait for NATS to be ready
 while ! (echo > /dev/tcp/localhost/4222) >/dev/null 2>&1; do
