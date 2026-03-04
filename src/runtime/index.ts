@@ -6,6 +6,8 @@ import { connect } from 'nats';
 import { Hub } from '../hub/Hub';
 import { Librarian } from '../services/fs/Librarian';
 import { Executor } from '../services/executor/Executor';
+import { Broker } from '../services/llm/Broker';
+import { CopilotAdapter } from '../services/llm/adapters/CopilotAdapter';
 
 const UI_DIR = '/data/ui';
 
@@ -26,6 +28,13 @@ async function bootstrap() {
   // Start the sovereign Executor service
   const executor = new Executor();
   await executor.start();
+
+  // Start the LLM Broker and Adapters
+  const broker = new Broker();
+  await broker.start();
+  
+  const copilotAdapter = new CopilotAdapter();
+  await copilotAdapter.start();
 
   // Temporary UI Host & WS Proxy to keep Cockpit alive
   const port = parseInt(process.env.HTTP_PORT || '7070');
