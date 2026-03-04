@@ -76,16 +76,20 @@ export interface KillRequest {
 
 // --- Inference Payloads ---
 export interface InferenceMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  tool_calls?: any[];
+  tool_call_id?: string;
 }
 export interface InferenceRequest {
   model: string;
   temperature: number;
   messages: InferenceMessage[];
+  tools?: any[];
 }
 export interface InferenceResponse {
   status: 'success' | 'error';
   content?: string;
+  tool_calls?: any[];
   error?: string;
 }
