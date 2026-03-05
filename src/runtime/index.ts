@@ -10,6 +10,7 @@ import { Broker } from '../services/llm/Broker';
 import { CopilotAdapter } from '../services/llm/adapters/CopilotAdapter';
 import { OpenAIAdapter } from '../services/llm/adapters/OpenAIAdapter';
 import { TempoServer } from '../services/tempo/TempoServer';
+import { MCPBridge } from '../services/mcp/MCPBridge';
 
 const UI_DIR = '/data/ui';
 
@@ -44,6 +45,10 @@ async function bootstrap() {
   // Start the Tempo Server
   const tempo = new TempoServer();
   await tempo.start();
+
+  // Start MCP Bridge for filesystem access in /data
+  const mcpFs = new MCPBridge('npx', ['-y', '@modelcontextprotocol/server-filesystem', '/data/artifacts']);
+  await mcpFs.start();
 
   // Temporary UI Host & WS Proxy to keep Cockpit alive
   const port = parseInt(process.env.HTTP_PORT || '7070');

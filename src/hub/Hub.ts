@@ -57,6 +57,17 @@ export class Hub {
         throw err;
       }
     }
+
+    try {
+      await jsm.streams.info('KV_ROOK_TOOLS');
+    } catch (err: any) {
+      if (err.message === 'stream not found') {
+        console.log('Creating ROOK_TOOLS KV bucket...');
+        await js.views.kv('ROOK_TOOLS', { history: 1 });
+      } else {
+        throw err;
+      }
+    }
   }
 
   private setupHandshakeHandler() {

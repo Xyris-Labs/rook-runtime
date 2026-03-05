@@ -5,6 +5,7 @@ export enum ServiceType {
   TEMPO = 'service.tempo',
   LLM_BROKER = 'service.llm.broker',
   LLM_ADAPTER = 'service.llm.adapter',
+  MCP_BRIDGE = 'service.mcp.bridge',
   WEB_HOST = 'service.web'
 }
 
@@ -91,5 +92,16 @@ export interface InferenceResponse {
   status: 'success' | 'error';
   content?: string;
   tool_calls?: any[];
+  error?: string;
+}
+
+// --- MCP Payloads ---
+export interface MCPCallRequest {
+  arguments: Record<string, any>;
+}
+
+export interface MCPCallResponse {
+  status: 'success' | 'error';
+  result?: any;
   error?: string;
 }
