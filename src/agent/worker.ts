@@ -21,6 +21,7 @@ if (!AGENT_ID || !NATS_URL) {
 
 class SovereignAgent {
   private nc!: NatsConnection;
+  private isThinking: boolean = false;
 
   async start() {
     try {
@@ -36,19 +37,53 @@ class SovereignAgent {
   }
 
   private subscribeToTopics() {
-    const handleEvent = async (err: any, msg: any) => {
-      if (err) {
-        console.error(`[Agent: ${AGENT_ID}] Subscription error:`, err);
-        return;
-      }
-      
-      const payload = msg.data.length > 0 ? jc.decode(msg.data) : {};
-      await this.runReasoningCycle(payload);
-    };
+    this.nc.subscribe(`agent.${AGENT_ID}.inbox`, { 
+      callback: async (err: any, msg: any) => {
+        if (err) {
+          console.error(`[Agent: ${AGENT_ID}] Inbox error:`, err);
+          return;
+        }
+        if (this.isThinking) {
+          console.log(`[Agent: ${AGENT_ID}] Ignoring inbox message, already thinking.`);
+          return;
+        }
+        
+        this.isThinking = true;
+        try {
+          const payload = msg.data.length > 0 ? jc.decode(msg.data) : {};
+          await this.runReasoningCycle(payload);
+        } finally {
+          this.isThinking = false;
+        }
+      } 
+    });
 
-    this.nc.subscribe(`agent.${AGENT_ID}.inbox`, { callback: handleEvent });
-    this.nc.subscribe(`agent.${AGENT_ID}.tick`, { callback: handleEvent });
-    this.nc.subscribe(`agent.${AGENT_ID}.task_complete`, { callback: handleEvent });
+    this.nc.subscribe(`agent.${AGENT_ID}.tick`, { 
+      callback: (err: any, msg: any) => {
+        if (err) return;
+        const payload = msg.data.length > 0 ? jc.decode(msg.data) : {};
+        // Sensory Gating: Mute ticks for now to prevent context flooding
+        console.log(`[Agent: ${AGENT_ID}] Tick received (muted):`, payload);
+      } 
+    });
+
+    this.nc.subscribe(`agent.${AGENT_ID}.task_complete`, { 
+      callback: async (err: any, msg: any) => {
+        if (err) return;
+        if (this.isThinking) {
+          console.log(`[Agent: ${AGENT_ID}] Ignoring task_complete message, already thinking.`);
+          return;
+        }
+        
+        this.isThinking = true;
+        try {
+          const payload = msg.data.length > 0 ? jc.decode(msg.data) : {};
+          await this.runReasoningCycle(payload);
+        } finally {
+          this.isThinking = false;
+        }
+      } 
+    });
   }
 
   private async requestFSRead(path: string): Promise<string | null> {
@@ -147,8 +182,10 @@ class SovereignAgent {
       incomingMessage = triggerPayload.content;
       chatHistory.push(triggerPayload);
     } else {
+      // For tasks/events that aren't strictly human chat, we might want to just process them without polluting the chat log,
+      // but for v0 standard, we will just parse it to string and log it if it's a user message.
       incomingMessage = JSON.stringify(triggerPayload);
-      chatHistory.push({ role: 'user', content: incomingMessage });
+      // Removed the generic chatHistory.push here to prevent system events from polluting chat.json
     }
 
     // 3. Discover Tools
@@ -175,6 +212,11 @@ class SovereignAgent {
       { role: 'system', content: systemPrompt },
       ...chatHistory
     ];
+
+    // If it was a system event (not added to chat history), we must still feed it to the LLM for this cycle
+    if (!triggerPayload || triggerPayload.role !== 'user' || !triggerPayload.content) {
+      messages.push({ role: 'user', content: incomingMessage });
+    }
 
     let cycleComplete = false;
     let finalResponseText = '';
@@ -252,16 +294,18 @@ class SovereignAgent {
 
       await this.requestFSWrite('scratchpad.md', updatedScratchpadStr);
       
-      // Update chat.json
-      chatHistory.push({ role: 'assistant', content: finalResponseText });
-      await this.requestFSWrite('chat.json', JSON.stringify(chatHistory, null, 2));
+      // Update chat.json only if this was part of a conversational flow
+      if (triggerPayload && triggerPayload.role === 'user' && triggerPayload.content) {
+        chatHistory.push({ role: 'assistant', content: finalResponseText });
+        await this.requestFSWrite('chat.json', JSON.stringify(chatHistory, null, 2));
 
-      // Broadcast to outbox
-      this.nc.publish(`agent.${AGENT_ID}.outbox`, jc.encode({
-        role: 'assistant',
-        content: finalResponseText,
-        ts: timestamp
-      }));
+        // Broadcast to outbox only for conversational flows
+        this.nc.publish(`agent.${AGENT_ID}.outbox`, jc.encode({
+          role: 'assistant',
+          content: finalResponseText,
+          ts: timestamp
+        }));
+      }
     }
     
     console.log(`[Agent: ${AGENT_ID}] Reasoning cycle finished.`);

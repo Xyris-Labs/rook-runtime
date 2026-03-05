@@ -12,7 +12,7 @@ const Chat: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
-  const [agentId] = useState('jerry'); // Hardcoded default for v0, can be made dynamic
+  const [agentId, setAgentId] = useState('jerry'); 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Scroll to bottom
@@ -28,6 +28,8 @@ const Chat: React.FC = () => {
   useEffect(() => {
     if (status !== 'connected') return;
 
+    let isSubscribed = true;
+
     const loadHistory = async () => {
       try {
         const res = await request('service.fs.read', {
@@ -38,16 +40,25 @@ const Chat: React.FC = () => {
 
         if (res.status === 'success' && res.content) {
           const parsed = JSON.parse(res.content);
-          if (Array.isArray(parsed)) {
+          if (Array.isArray(parsed) && isSubscribed) {
             setMessages(parsed);
           }
+        } else if (isSubscribed) {
+          setMessages([]);
         }
       } catch (err) {
         console.warn('Could not load chat history:', err);
+        if (isSubscribed) setMessages([]);
       }
     };
 
+    // Reset messages locally before we fetch to ensure clean slate
+    setMessages([]);
     loadHistory();
+
+    return () => {
+      isSubscribed = false;
+    };
   }, [status, request, agentId]);
 
   // Subscribe to Outbox
@@ -84,7 +95,16 @@ const Chat: React.FC = () => {
       <div className="border-b border-divider pb-4 flex justify-between items-end shrink-0">
         <div>
           <h2 className="text-2xl font-black uppercase tracking-tighter italic">Intercom</h2>
-          <p className="text-gray-500 text-sm">Direct NATS communication with {agentId}</p>
+          <p className="text-gray-500 text-sm">Direct NATS communication</p>
+        </div>
+        <div>
+           <input 
+             type="text"
+             value={agentId}
+             onChange={(e) => setAgentId(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
+             className="bg-black/40 border border-divider rounded-lg px-3 py-1 text-sm font-mono outline-none focus:border-primary text-primary"
+             placeholder="Agent ID"
+           />
         </div>
       </div>
 
