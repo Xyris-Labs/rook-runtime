@@ -1,29 +1,20 @@
 import { connect, NatsConnection, JSONCodec, KV } from 'nats';
-import { 
-  ServiceType, 
-  HandshakeRequest, 
-  HandshakeResponse, 
-  StatusEntry,
-  InferenceRequest,
-  InferenceResponse,
-  FSScope,
-  FSReadRequest,
-  FSWriteRequest,
-  FSResponse
-} from '../../../types';
+import { ServiceType, StatusEntry, FSWriteRequest, FSScope, FSReadRequest, InferenceRequest } from '../../../types';
 
 const jc = JSONCodec();
-const CLIENT_ID = 'Iv1.b507a08c87ecfe98'; // Known Copilot Client ID
+
+// Official VS Code Copilot OAuth Client ID
+const CLIENT_ID = '01ab8ac9400c4e429b23'; 
 
 export class CopilotAdapter {
   private nc!: NatsConnection;
   private uuid!: string;
   private statusKv!: KV;
-  
-  private token: string | null = null;
-  private authState: 'initializing' | 'auth_required' | 'polling' | 'online' | 'error' = 'initializing';
+  private authState: 'online' | 'auth_required' | 'error' | 'offline' = 'offline';
   private authAlerts: any[] = [];
-  private pollingInterval: any = null;
+  private token: string | null = null;
+  private deviceCode: string | null = null;
+  private pollTimeout: NodeJS.Timeout | null = null;
 
   async start() {
     console.log('Starting Copilot Adapter service...');
@@ -35,255 +26,242 @@ export class CopilotAdapter {
       
       const js = this.nc.jetstream();
       this.statusKv = await js.views.kv('ROOK_STATUS');
-
+      
       await this.handshake();
       this.startHeartbeat();
       this.setupHandlers();
       
-      await this.checkAuth();
-      
       console.log('Copilot Adapter service initialized.');
+      
+      await this.checkAuthStatus();
     } catch (err) {
       console.error('Copilot Adapter failed to start:', err);
       process.exit(1);
     }
   }
-
+  
   private async handshake() {
-    const req: HandshakeRequest = { type: ServiceType.LLM_ADAPTER, name: 'copilot' };
     try {
-      const msg = await this.nc.request('registry.handshake', jc.encode(req), { timeout: 5000 });
-      const res = jc.decode(msg.data) as HandshakeResponse;
+      const msg = await this.nc.request('registry.handshake', jc.encode({ type: ServiceType.LLM_ADAPTER, name: 'copilot' }), { timeout: 5000 });
+      const res = jc.decode(msg.data) as any;
       this.uuid = res.uuid;
       console.log(`Copilot Adapter acquired UUID: ${this.uuid}`);
     } catch (err) {
-      console.error('Copilot Adapter failed handshake:', err);
+      console.error('Adapter failed handshake:', err);
       throw err;
     }
   }
-
+  
   private startHeartbeat() {
     const sendStatus = async () => {
       const status: StatusEntry = {
-        status: this.authState === 'online' ? 'online' : (this.authState === 'auth_required' || this.authState === 'polling' ? 'auth_required' : 'error'),
+        status: this.authState,
         load: 0,
-        capabilities: this.authState === 'online' ? ['gpt-4o', 'claude-3.5-sonnet'] : [],
+        capabilities: ['gpt-4o', 'claude-3.5-sonnet'],
         alerts: this.authAlerts,
         last_seen: new Date().toISOString()
       };
       try {
         await this.statusKv.put(this.uuid, jc.encode(status));
       } catch (err) {
-        console.error('Copilot Adapter failed to put status:', err);
+        // Ignore KV write failures in the background
       }
     };
-    
     sendStatus();
-    setInterval(sendStatus, 10000);
+    setInterval(sendStatus, 5000);
   }
-
-  private async checkAuth() {
-    try {
-      const req: FSReadRequest = { scope: FSScope.SYSTEM, path: 'llm/copilot.json' };
-      const resMsg = await this.nc.request('service.fs.read', jc.encode(req), { timeout: 5000 });
-      const res = jc.decode(resMsg.data) as FSResponse;
-
-      if (res.status === 'success' && res.content) {
-        const data = JSON.parse(res.content);
-        if (data.access_token) {
-          this.token = data.access_token;
-          this.authState = 'online';
-          this.authAlerts = [];
-          console.log('[Copilot] Loaded existing token, status is online.');
-          return;
+  
+  private async checkAuthStatus() {
+     try {
+        const req: FSReadRequest = { scope: FSScope.SYSTEM, path: 'llm/copilot.json' };
+        const msg = await this.nc.request('service.fs.read', jc.encode(req), { timeout: 5000 });
+        const res = jc.decode(msg.data) as any;
+        
+        if (res.status === 'success' && res.content) {
+            const data = JSON.parse(res.content);
+            if (data.access_token) {
+                this.token = data.access_token;
+                this.authState = 'online';
+                this.authAlerts = [];
+                console.log('[Copilot] Loaded existing token from Vault.');
+                return;
+            }
         }
-      }
-    } catch (err) {
-      console.log('[Copilot] No existing token found or read error:', err);
-    }
-
-    // No token, initiate device flow
-    await this.initiateDeviceFlow();
+     } catch (e) {
+         console.log('[Copilot] No existing token found or error reading Vault.');
+     }
+     
+     // If we reach here, we need to authorize.
+     this.initiateDeviceFlow();
   }
 
   private async initiateDeviceFlow() {
-    this.authState = 'auth_required';
-    console.log('[Copilot] Initiating GitHub Device Flow...');
-    
-    try {
-      const res = await fetch('https://github.com/login/device/code', {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ client_id: CLIENT_ID, scope: 'read:user' })
-      });
-      
-      const data: any = await res.json();
-      
-      if (data.device_code && data.user_code && data.verification_uri) {
-        this.authAlerts = [{
-          type: 'AUTH_REQUIRED',
-          provider: 'copilot',
-          code: data.user_code,
-          url: data.verification_uri,
-          message: 'Please authenticate with GitHub to enable Copilot inference.'
-        }];
-        this.authState = 'polling';
-        
-        console.log(`[Copilot] Auth required: Please visit ${data.verification_uri} and enter code ${data.user_code}`);
-        
-        // Start polling
-        this.startPolling(data.device_code, data.interval || 5);
-      } else {
-        throw new Error('Invalid response from GitHub Device Code API');
-      }
-    } catch (e: any) {
-      console.error('[Copilot] Device Flow Error:', e.message);
-      this.authState = 'error';
-    }
+     console.log('[Copilot] Initiating GitHub Device Flow...');
+     try {
+         const res = await fetch('https://github.com/login/device/code', {
+             method: 'POST',
+             headers: {
+                 'Accept': 'application/json',
+                 'Content-Type': 'application/json'
+             },
+             body: JSON.stringify({
+                 client_id: CLIENT_ID,
+                 scope: 'user:email'
+             })
+         });
+         const data = await res.json();
+         
+         if (data.device_code && data.user_code) {
+             this.deviceCode = data.device_code;
+             this.authState = 'auth_required';
+             this.authAlerts = [{
+                 type: 'AUTH_REQUIRED',
+                 provider: 'github-copilot',
+                 code: data.user_code,
+                 url: data.verification_uri,
+                 message: 'Please authorize GitHub Copilot. The UI will unlock automatically.'
+             }];
+             
+             console.log(`[Copilot] Auth required: Please visit ${data.verification_uri} and enter code ${data.user_code}`);
+             
+             // Begin recursive polling
+             this.pollForToken(data.interval || 5);
+         }
+     } catch (e) {
+         console.error('[Copilot] Failed to initiate device flow', e);
+         this.authState = 'error';
+     }
   }
-
-  private startPolling(deviceCode: string, intervalSeconds: number) {
-    if (this.pollingInterval) clearInterval(this.pollingInterval);
-    
-    this.pollingInterval = setInterval(async () => {
-      console.log('[Copilot] Polling for token...');
-      try {
-        const res = await fetch('https://github.com/login/oauth/access_token', {
-          method: 'POST',
-          headers: {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            client_id: CLIENT_ID,
-            device_code: deviceCode,
-            grant_type: 'urn:ietf:params:oauth:grant-type:device_code'
-          })
-        });
-        
-        const data: any = await res.json();
-        
-        if (data.access_token) {
-          console.log('[Copilot] Successfully acquired token!');
-          clearInterval(this.pollingInterval);
-          this.pollingInterval = null;
-          this.token = data.access_token;
-          this.authState = 'online';
-          this.authAlerts = [];
-          
-          // Save token via Librarian
-          const writeReq: FSWriteRequest = {
-            scope: FSScope.SYSTEM,
-            path: 'llm/copilot.json',
-            content: JSON.stringify({ access_token: this.token })
-          };
-          await this.nc.request('service.fs.write', jc.encode(writeReq), { timeout: 5000 });
-        } else if (data.error && data.error !== 'authorization_pending' && data.error !== 'slow_down') {
-          console.error('[Copilot] Polling error:', data.error);
-          clearInterval(this.pollingInterval);
-          this.pollingInterval = null;
-          this.authState = 'error';
-        } else if (data.error === 'slow_down') {
-           // Ignore and just wait for next poll
-           console.log('[Copilot] Polling slow down requested...');
-        }
-      } catch (e) {
-        console.error('[Copilot] Polling exception:', e);
-      }
-    }, intervalSeconds * 1000);
+  
+  private pollForToken(intervalSeconds: number) {
+     const poll = async () => {
+         if (!this.deviceCode) return;
+         
+         try {
+             const res = await fetch('https://github.com/login/oauth/access_token', {
+                 method: 'POST',
+                 headers: {
+                     'Accept': 'application/json',
+                     'Content-Type': 'application/json'
+                 },
+                 body: JSON.stringify({
+                     client_id: CLIENT_ID,
+                     device_code: this.deviceCode,
+                     grant_type: 'urn:ietf:params:oauth:grant-type:device_code'
+                 })
+             });
+             
+             const data = await res.json();
+             
+             if (data.access_token) {
+                 console.log('[Copilot] Token acquired successfully!');
+                 this.token = data.access_token;
+                 this.authState = 'online';
+                 this.authAlerts = [];
+                 this.deviceCode = null;
+                 
+                 // Save token via Librarian to physical disk
+                 const writeReq: FSWriteRequest = {
+                     scope: FSScope.SYSTEM,
+                     path: 'llm/copilot.json',
+                     content: JSON.stringify({ access_token: this.token })
+                 };
+                 this.nc.request('service.fs.write', jc.encode(writeReq), { timeout: 5000 }).catch(() => {});
+                 return; // Break the recursion
+             } 
+             else if (data.error === 'authorization_pending') {
+                 // Normal waiting state, do nothing but poll again
+             } 
+             else if (data.error === 'slow_down') {
+                 intervalSeconds += 5; // Crucial GitHub API requirement
+                 console.log(`[Copilot] Slow down requested. Increasing interval to ${intervalSeconds}s`);
+             } 
+             else if (data.error === 'expired_token') {
+                 console.error('[Copilot] Device code expired. Restarting flow.');
+                 this.initiateDeviceFlow();
+                 return; // Break recursion
+             } 
+             else if (data.error) {
+                 console.error('[Copilot] Polling error:', data.error);
+             }
+         } catch (e) {
+             console.error('[Copilot] Fetch error during polling:', e);
+         }
+         
+         // Queue next poll recursively based on the dynamically updated interval
+         this.pollTimeout = setTimeout(poll, intervalSeconds * 1000);
+     };
+     
+     this.pollTimeout = setTimeout(poll, intervalSeconds * 1000);
   }
 
   private setupHandlers() {
-    this.nc.subscribe('provider.copilot.inference', {
-      callback: async (err, msg) => {
-        if (err) return;
-        
-        const req = jc.decode(msg.data) as InferenceRequest;
-        let response: InferenceResponse;
-        
-        if (this.authState !== 'online' || !this.token) {
-          response = { status: 'error', error: 'Adapter is not online or missing token' };
-          msg.respond(jc.encode(response));
-          return;
+     this.nc.subscribe('provider.copilot.inference', {
+        callback: async (err, msg) => {
+            if (err) return;
+            const req = jc.decode(msg.data) as InferenceRequest;
+            
+            if (this.authState !== 'online' || !this.token) {
+                msg.respond(jc.encode({ status: 'error', error: 'Adapter is offline or unauthenticated' }));
+                return;
+            }
+            
+            try {
+                // 1. Exchange OAuth token for an internal Copilot token
+                const tokenRes = await fetch('https://api.github.com/copilot_internal/v2/token', {
+                    headers: {
+                        'Authorization': `Bearer ${this.token}`,
+                        'Accept': 'application/json'
+                    }
+                });
+                
+                if (tokenRes.status === 401) throw new Error('auth failed');
+                
+                const tokenData = await tokenRes.json();
+                const copilotToken = tokenData.token;
+                
+                // 2. Execute standard Chat Completions
+                const infRes = await fetch('https://api.githubcopilot.com/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${copilotToken}`,
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        model: req.model,
+                        temperature: req.temperature,
+                        messages: req.messages,
+                        tools: req.tools
+                    })
+                });
+                
+                if (!infRes.ok) {
+                    if (infRes.status === 401) throw new Error('auth failed');
+                    throw new Error(`Copilot API Error: ${infRes.status}`);
+                }
+                
+                const infData = await infRes.json();
+                const message = infData.choices?.[0]?.message;
+                
+                msg.respond(jc.encode({
+                    status: 'success',
+                    content: message?.content || '',
+                    tool_calls: message?.tool_calls || []
+                }));
+                
+            } catch (e: any) {
+                console.error('[Copilot] Inference failed:', e.message);
+                msg.respond(jc.encode({ status: 'error', error: e.message }));
+                
+                // If token is dead, wipe memory and start over
+                if (e.message.includes('auth failed')) {
+                    this.token = null;
+                    this.authState = 'auth_required';
+                    this.initiateDeviceFlow();
+                }
+            }
         }
-
-        try {
-          // Copilot token exchange (usually OAuth token is exchanged for a copilot token)
-          // For simplicity in this v0 adapter, we will attempt direct chat completions.
-          // Note: Full Copilot integration requires hitting https://api.github.com/copilot_internal/v2/token first.
-          
-          const tokenRes = await fetch('https://api.github.com/copilot_internal/v2/token', {
-             headers: {
-               'Authorization': `Bearer ${this.token}`,
-               'Accept': 'application/json'
-             }
-          });
-          
-          if (tokenRes.status === 401) {
-             throw new Error('Copilot auth token expired or invalid');
-          }
-          
-          const tokenData: any = await tokenRes.json();
-          const copilotToken = tokenData.token;
-
-          const copilotReq = {
-            model: req.model,
-            temperature: req.temperature,
-            messages: req.messages,
-            tools: req.tools
-          };
-
-          const infRes = await fetch('https://api.githubcopilot.com/chat/completions', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${copilotToken}`,
-              'Content-Type': 'application/json',
-              'Accept': 'application/json'
-            },
-            body: JSON.stringify(copilotReq)
-          });
-
-          if (infRes.status === 401) {
-            throw new Error('Copilot chat completion auth failed');
-          }
-
-          if (!infRes.ok) {
-            throw new Error(`Copilot API error: ${infRes.status} ${infRes.statusText}`);
-          }
-
-          const infData: any = await infRes.json();
-          
-          const message = infData.choices && infData.choices[0] ? infData.choices[0].message : null;
-          
-          response = { 
-            status: 'success', 
-            content: message ? message.content : '',
-            tool_calls: message && message.tool_calls ? message.tool_calls : []
-          };
-
-        } catch (e: any) {
-          console.error(`[Copilot] Inference error:`, e.message);
-          response = { status: 'error', error: e.message };
-          
-          if (e.message.includes('expired') || e.message.includes('auth failed')) {
-             this.token = null;
-             this.authState = 'auth_required';
-             // Wipe token
-             const writeReq: FSWriteRequest = {
-               scope: FSScope.SYSTEM,
-               path: 'llm/copilot.json',
-               content: '{}'
-             };
-             this.nc.request('service.fs.write', jc.encode(writeReq), { timeout: 5000 }).catch(()=>{});
-             this.initiateDeviceFlow();
-          }
-        }
-        
-        msg.respond(jc.encode(response));
-      }
-    });
+     });
   }
 }
