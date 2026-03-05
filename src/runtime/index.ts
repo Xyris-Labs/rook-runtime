@@ -8,6 +8,7 @@ import { Librarian } from '../services/fs/Librarian';
 import { Executor } from '../services/executor/Executor';
 import { Broker } from '../services/llm/Broker';
 import { CopilotAdapter } from '../services/llm/adapters/CopilotAdapter';
+import { TempoServer } from '../services/tempo/TempoServer';
 
 const UI_DIR = '/data/ui';
 
@@ -35,6 +36,10 @@ async function bootstrap() {
   
   const copilotAdapter = new CopilotAdapter();
   await copilotAdapter.start();
+
+  // Start the Tempo Server
+  const tempo = new TempoServer();
+  await tempo.start();
 
   // Temporary UI Host & WS Proxy to keep Cockpit alive
   const port = parseInt(process.env.HTTP_PORT || '7070');
