@@ -5,7 +5,7 @@ import { Play, Square, Save, Download, AlertCircle } from 'lucide-react';
 const Agents: React.FC = () => {
   const { request, status } = useNats();
   const [agentId, setAgentId] = useState('jerry');
-  const [profileContent, setProfileContent] = useState('{\n  "contextFiles": [\n    "persona.md"\n  ]\n}');
+  const [profileContent, setProfileContent] = useState('{\n  "model": {\n    "name": "local-model",\n    "temp": 0.7\n  },\n  "contextFiles": [\n    "persona.md"\n  ]\n}');
   const [personaContent, setPersonaContent] = useState('# Persona\n\nYou are a helpful agent.');
   const [statusMessage, setStatusMessage] = useState('');
 
@@ -24,10 +24,11 @@ const Agents: React.FC = () => {
         agent_id: agentId,
         path: 'profile.json'
       });
+
       if (profileRes.status === 'success' && profileRes.content) {
         setProfileContent(profileRes.content);
       } else {
-        setProfileContent('{\n  "contextFiles": [\n    "persona.md"\n  ]\n}');
+        setProfileContent('{\n  "model": {\n    "name": "local-model",\n    "temp": 0.7\n  },\n  "contextFiles": [\n    "persona.md"\n  ]\n}');
         console.warn('Profile read error:', profileRes.error);
       }
 

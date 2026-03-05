@@ -8,6 +8,7 @@ import { Librarian } from '../services/fs/Librarian';
 import { Executor } from '../services/executor/Executor';
 import { Broker } from '../services/llm/Broker';
 import { CopilotAdapter } from '../services/llm/adapters/CopilotAdapter';
+import { OpenAIAdapter } from '../services/llm/adapters/OpenAIAdapter';
 import { TempoServer } from '../services/tempo/TempoServer';
 
 const UI_DIR = '/data/ui';
@@ -36,6 +37,9 @@ async function bootstrap() {
   
   const copilotAdapter = new CopilotAdapter();
   await copilotAdapter.start();
+
+  const openAiAdapter = new OpenAIAdapter();
+  await openAiAdapter.start();
 
   // Start the Tempo Server
   const tempo = new TempoServer();
