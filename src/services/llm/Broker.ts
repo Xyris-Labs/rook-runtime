@@ -83,15 +83,21 @@ export class Broker {
           let selectedAdapterName = 'copilot'; // fallback default for v0
 
           // Scan ROOK_STATUS for online adapters with the requested model
-          const statusKeys = await this.statusKv.keys();
-          for await (const k of statusKeys) {
+          const statusKeysIter = await this.statusKv.keys();
+          const statusKeys: string[] = [];
+          for await (const k of statusKeysIter) { statusKeys.push(k); }
+
+          for (const k of statusKeys) {
             const entry = await this.statusKv.get(k);
             if (entry) {
               const status = jc.decode(entry.value) as StatusEntry;
               if (status.status === 'online' && status.capabilities.includes(req.model)) {
                 // Find matching registry entry to get adapter name
-                const regKeys = await this.registryKv.keys();
-                for await (const rk of regKeys) {
+                const regKeysIter = await this.registryKv.keys();
+                const regKeys: string[] = [];
+                for await (const rk of regKeysIter) { regKeys.push(rk); }
+
+                for (const rk of regKeys) {
                   const regEntry = await this.registryKv.get(rk);
                   if (regEntry) {
                     const regUuid = sc.decode(regEntry.value);
