@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard';
 import Agents from './pages/Agents';
 import Schedules from './pages/Schedules';
 import System from './pages/System';
+import Chat from './pages/Chat';
 import { NatsProvider } from './context/NatsContext';
 
 function App() {
@@ -13,6 +14,7 @@ function App() {
         <Routes>
           <Route path="/" element={<MainLayout />}>
             <Route index element={<Dashboard />} />
+            <Route path="chat" element={<Chat />} />
             <Route path="agents" element={<Agents />} />
             <Route path="schedules" element={<Schedules />} />
             <Route path="system" element={<System />} />

@@ -1,10 +1,11 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Users, Calendar, Settings } from 'lucide-react';
+import { LayoutDashboard, Users, Calendar, Settings, MessageSquare } from 'lucide-react';
 
 const Sidebar: React.FC = () => {
   const navItems = [
     { name: 'Dashboard', path: '/', icon: LayoutDashboard },
+    { name: 'Intercom', path: '/chat', icon: MessageSquare },
     { name: 'Agents', path: '/agents', icon: Users },
     { name: 'Schedules', path: '/schedules', icon: Calendar },
     { name: 'System', path: '/system', icon: Settings },

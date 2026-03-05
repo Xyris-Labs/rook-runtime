@@ -117,21 +117,38 @@ class SovereignAgent {
     for (const file of contextFiles) {
       const content = await this.requestFSRead(file);
       if (content !== null) {
-        systemPrompt += `
---- [${file}] ---
-${content}
-`;
+        systemPrompt += `\n--- [${file}] ---\n${content}\n`;
         if (file === 'scratchpad.md') {
           scratchpadContent = content;
         }
       }
     }
 
-    // If no scratchpad.md was explicitly fetched but we need to write to it later,
-    // we'll just attempt to read it now if it wasn't in contextFiles (standard fallback)
     if (!contextFiles.includes('scratchpad.md')) {
       const sp = await this.requestFSRead('scratchpad.md');
       scratchpadContent = sp || '';
+    }
+
+    // 2.5 Hydrate Chat History
+    let chatHistory: any[] = [];
+    const chatJsonStr = await this.requestFSRead('chat.json');
+    if (chatJsonStr) {
+      try {
+        chatHistory = JSON.parse(chatJsonStr);
+        if (!Array.isArray(chatHistory)) chatHistory = [];
+      } catch (e) {
+        chatHistory = [];
+      }
+    }
+
+    // Process incoming trigger as a user message if valid
+    let incomingMessage = '';
+    if (triggerPayload && triggerPayload.role === 'user' && triggerPayload.content) {
+      incomingMessage = triggerPayload.content;
+      chatHistory.push(triggerPayload);
+    } else {
+      incomingMessage = JSON.stringify(triggerPayload);
+      chatHistory.push({ role: 'user', content: incomingMessage });
     }
 
     // 3. Discover Tools
@@ -156,7 +173,7 @@ ${content}
     // 4. Inference & Tool Loop
     const messages: InferenceMessage[] = [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: JSON.stringify(triggerPayload) }
+      ...chatHistory
     ];
 
     let cycleComplete = false;
@@ -200,7 +217,7 @@ ${content}
           let toolResultStr = '';
           try {
             const mcpReq = await this.nc.request(`mcp.v1.tools.call.${toolName}`, jc.encode(toolArgs), { timeout: 30000 });
-            const mcpRes = jc.decode(mcpReq.data);
+            const mcpRes = jc.decode(mcpReq.data) as any;
             toolResultStr = JSON.stringify(mcpRes);
           } catch (e: any) {
             console.error(`[Agent: ${AGENT_ID}] MCP Tool call failed for ${toolName}:`, e.message);
@@ -223,23 +240,28 @@ ${content}
       }
     }
 
-    // 5. Memory Commit
+    // 5. Memory Commit & Broadcast
     if (finalResponseText) {
-      console.log(`[Agent: ${AGENT_ID}] Final response generated. Committing to scratchpad.md`);
+      console.log(`[Agent: ${AGENT_ID}] Final response generated. Committing to memory and broadcasting.`);
       
+      // Update scratchpad
       const timestamp = new Date().toISOString();
       const updatedScratchpadStr = scratchpadContent 
-        ? `${scratchpadContent}
+        ? `${scratchpadContent}\n\n[${timestamp}] Incoming Payload: ${incomingMessage}\nResponse: ${finalResponseText}`
+        : `[${timestamp}] Incoming Payload: ${incomingMessage}\nResponse: ${finalResponseText}`;
 
-[${timestamp}] Incoming Payload: ${JSON.stringify(triggerPayload)}
-Response: ${finalResponseText}`
-        : `[${timestamp}] Incoming Payload: ${JSON.stringify(triggerPayload)}
-Response: ${finalResponseText}`;
+      await this.requestFSWrite('scratchpad.md', updatedScratchpadStr);
+      
+      // Update chat.json
+      chatHistory.push({ role: 'assistant', content: finalResponseText });
+      await this.requestFSWrite('chat.json', JSON.stringify(chatHistory, null, 2));
 
-      const writeSuccess = await this.requestFSWrite('scratchpad.md', updatedScratchpadStr);
-      if (writeSuccess) {
-        console.log(`[Agent: ${AGENT_ID}] Successfully updated scratchpad.md`);
-      }
+      // Broadcast to outbox
+      this.nc.publish(`agent.${AGENT_ID}.outbox`, jc.encode({
+        role: 'assistant',
+        content: finalResponseText,
+        ts: timestamp
+      }));
     }
     
     console.log(`[Agent: ${AGENT_ID}] Reasoning cycle finished.`);
