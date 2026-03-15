@@ -12,7 +12,9 @@ import { OpenAIAdapter } from '../services/llm/adapters/OpenAIAdapter';
 import { TempoServer } from '../services/tempo/TempoServer';
 import { MCPBridge } from '../services/mcp/MCPBridge';
 
-const UI_DIR = '/data/ui';
+const CONTAINER_UI_DIR = '/data/ui';
+const LOCAL_UI_DIR = path.resolve(__dirname, '../../rook_data/ui');
+const UI_DIR = fs.existsSync(CONTAINER_UI_DIR) ? CONTAINER_UI_DIR : LOCAL_UI_DIR;
 
 async function bootstrap() {
   console.log('Bootstrapping Rook v2.0 Service Mesh...');
@@ -58,7 +60,8 @@ async function bootstrap() {
   // Temporary UI Host & WS Proxy to keep Cockpit alive
   const port = parseInt(process.env.HTTP_PORT || '7070');
   const server = http.createServer(async (req, res) => {
-    let urlPath = req.url === '/' ? '/index.html' : req.url!;
+    const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    const urlPath = requestUrl.pathname === '/' ? '/index.html' : requestUrl.pathname;
 
     // Micro-Frontend Proxy Route
     if (urlPath.match(/^\/api\/workers\/[^\/]+\/ui\.js$/)) {
@@ -133,6 +136,7 @@ async function bootstrap() {
   });
 
   server.listen(port, () => {
+    console.log(`[Stub] Serving UI from ${UI_DIR}`);
     console.log(`[Stub] HTTP Server + WS Bridge listening on port ${port}`);
   });
 }
