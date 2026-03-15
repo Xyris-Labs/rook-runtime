@@ -19,7 +19,7 @@ export function useWorkerRegistry() {
     const initWatch = async () => {
       try {
         const js = connection.jetstream();
-        const kv = await js.views.kv('ROOK_REGISTRY');
+        const kv = await js.views.kv('ROOK_STATUS');
         watch = await kv.watch();
 
         for await (const entry of watch) {

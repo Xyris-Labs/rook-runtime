@@ -28,6 +28,8 @@ export class Hub {
       this.statusKv = await js.views.kv('ROOK_STATUS');
 
       this.setupHandshakeHandler();
+      this.setupHeartbeatHandler();
+      this.setupDeregisterHandler();
       console.log('Hub initialized successfully.');
     } catch (err) {
       console.error('Hub initialization failed:', err);
@@ -100,6 +102,7 @@ export class Hub {
           }
 
           await this.registryKv.put(key, sc.encode(uuid));
+          await this.statusKv.put(key, sc.encode(uuid));
           
           const res: HandshakeResponse = { uuid };
           msg.respond(jc.encode(res));
@@ -108,6 +111,35 @@ export class Hub {
           console.error('Failed to handle handshake:', e);
         }
       }
+    });
+  }
+
+  private setupHeartbeatHandler() {
+    this.nc.subscribe('registry.heartbeat', {
+      callback: async (err, msg) => {
+        if (err) return;
+        try {
+          const req = jc.decode(msg.data) as { key: string; uuid: string };
+          await this.statusKv.put(req.key, sc.encode(req.uuid));
+        } catch (e) {
+          console.error('Failed to handle heartbeat:', e);
+        }
+      },
+    });
+  }
+
+  private setupDeregisterHandler() {
+    this.nc.subscribe('registry.deregister', {
+      callback: async (err, msg) => {
+        if (err) return;
+        try {
+          const req = jc.decode(msg.data) as { key: string };
+          await this.statusKv.delete(req.key);
+          console.log(`Deregistered service liveness: ${req.key}`);
+        } catch (e) {
+          console.error('Failed to handle deregistration:', e);
+        }
+      },
     });
   }
 }
