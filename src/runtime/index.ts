@@ -107,8 +107,15 @@ async function bootstrap() {
       });
       fs.createReadStream(filePath).pipe(res);
     } else {
-      res.writeHead(404);
-      res.end('Not Found');
+      // SPA Catch-all: Route unknown paths back to index.html
+      const indexPath = path.join(UI_DIR, 'index.html');
+      if (fs.existsSync(indexPath)) {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        fs.createReadStream(indexPath).pipe(res);
+      } else {
+        res.writeHead(404);
+        res.end('Not Found');
+      }
     }
   });
 
