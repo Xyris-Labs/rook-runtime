@@ -1,9 +1,18 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import DynamicAgentNode from '../components/DynamicAgentNode';
 
 export default function Agents() {
   const [targetUuid, setTargetUuid] = useState('');
   const [mountedUuid, setMountedUuid] = useState('');
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const w = params.get('worker');
+    if (w) {
+      setTargetUuid(w);
+      setMountedUuid(w);
+    }
+  }, []);
 
   return (
     <div className="space-y-6">
