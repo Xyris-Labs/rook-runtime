@@ -2,7 +2,7 @@ import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { connect } from 'nats';
+import { connect, StringCodec } from 'nats';
 import { Hub } from '../hub/Hub';
 import { Librarian } from '../services/fs/Librarian';
 import { Executor } from '../services/executor/Executor';
@@ -50,10 +50,34 @@ async function bootstrap() {
   const mcpFs = new MCPBridge('npx', ['-y', '@modelcontextprotocol/server-filesystem', '/data/artifacts']);
   await mcpFs.start();
 
+  // NATS client for the HTTP Proxy
+  const natsUrl = process.env.NATS_URL || 'nats://localhost:4222';
+  const proxyNc = await connect({ servers: natsUrl });
+  const sc = StringCodec();
+
   // Temporary UI Host & WS Proxy to keep Cockpit alive
   const port = parseInt(process.env.HTTP_PORT || '7070');
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     let urlPath = req.url === '/' ? '/index.html' : req.url!;
+
+    // Micro-Frontend Proxy Route
+    if (urlPath.match(/^\/api\/workers\/[^\/]+\/ui\.js$/)) {
+      const uuid = urlPath.split('/')[3];
+      try {
+        const rep = await proxyNc.request(`worker.${uuid}.get_ui`, new Uint8Array(0), { timeout: 5000 });
+        res.writeHead(200, {
+          'Content-Type': 'application/javascript',
+          'Cache-Control': 'no-cache, no-store, must-revalidate'
+        });
+        res.end(sc.decode(rep.data));
+      } catch (err: any) {
+        console.error(`[Proxy] Failed to fetch UI for ${uuid}:`, err.message);
+        res.writeHead(504, { 'Content-Type': 'application/javascript' });
+        res.end(`console.error("Failed to load worker UI: ${err.message}");`);
+      }
+      return;
+    }
+
     let filePath: string;
 
     if (urlPath.startsWith('/data')) {
