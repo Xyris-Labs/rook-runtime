@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
-import { connect, JSONCodec } from 'nats.ws';
+import { connect, JSONCodec, StringCodec } from 'nats.ws';
 import type { NatsConnection, JetStreamClient } from 'nats.ws';
 
 // Since the UI doesn't have direct access to the backend types, we redefine StatusEntry here.
@@ -75,26 +75,38 @@ export const NatsProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const statusKv = await js.views.kv('ROOK_STATUS');
           const watcher = await statusKv.watch();
           kvWatchRef.current = watcher;
+          const sc = StringCodec();
           
           (async () => {
             for await (const entry of watcher) {
               if (!active) break;
               if (entry.operation === 'DEL' || entry.operation === 'PURGE') {
                 setMeshStatus(prev => {
-                  const copy = { ...prev };
-                  delete copy[entry.key];
-                  return copy;
+                  const next = { ...prev };
+                  delete next[entry.key];
+                  return next;
                 });
               } else {
+                const rawValue = sc.decode(entry.value);
+                let statusEntry: StatusEntry;
+
                 try {
-                  const decoded = jc.decode(entry.value) as StatusEntry;
-                  setMeshStatus(prev => ({
-                    ...prev,
-                    [entry.key]: decoded
-                  }));
-                } catch (e) {
-                  console.error('Failed to decode StatusEntry:', e);
+                  statusEntry = JSON.parse(rawValue);
+                } catch (err) {
+                  // It's a raw string (like a dynamic worker UUID), mock the StatusEntry
+                  statusEntry = {
+                    status: 'online',
+                    load: 0,
+                    capabilities: ['dynamic-ui'],
+                    alerts: [],
+                    last_seen: new Date().toISOString(),
+                  };
                 }
+
+                setMeshStatus(prev => ({
+                  ...prev,
+                  [entry.key]: statusEntry
+                }));
               }
             }
           })().catch(console.error);
