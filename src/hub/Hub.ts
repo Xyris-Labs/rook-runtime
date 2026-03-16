@@ -13,7 +13,7 @@ export class Hub {
   async start() {
     console.log('Starting Hub...');
     const natsUrl = process.env.NATS_URL || 'nats://localhost:4222';
-    
+
     try {
       this.nc = await connect({ servers: natsUrl });
       console.log(`Hub connected to NATS at ${natsUrl}`);
@@ -23,7 +23,7 @@ export class Hub {
 
       // Ensure KV Buckets exist
       await this.ensureKVs(jsm, js);
-      
+
       this.registryKv = await js.views.kv('ROOK_REGISTRY');
       this.statusKv = await js.views.kv('ROOK_STATUS');
 
@@ -83,34 +83,33 @@ export class Hub {
         try {
           const req = jc.decode(msg.data) as HandshakeRequest;
           const key = `${req.type}.${req.name}`;
-          
+
           let uuid: string = '';
-          
+
           try {
             const entry = await this.registryKv.get(key);
             if (entry) {
-               uuid = sc.decode(entry.value);
-               console.log(`Resumed service: ${key} -> ${uuid}`);
+              uuid = sc.decode(entry.value);
+              console.log(`Resumed service: ${key} -> ${uuid}`);
             }
-          } catch(e) {
-             // likely key not found
+          } catch (e) {
+            // likely key not found
           }
-          
+
           if (!uuid) {
-             uuid = uuidv4();
-             console.log(`Registered new service: ${key} -> ${uuid}`);
+            uuid = uuidv4();
+            console.log(`Registered new service: ${key} -> ${uuid}`);
           }
 
           await this.registryKv.put(key, sc.encode(uuid));
           await this.statusKv.put(key, sc.encode(uuid));
-          
+
           const res: HandshakeResponse = { uuid };
           msg.respond(jc.encode(res));
-
         } catch (e) {
           console.error('Failed to handle handshake:', e);
         }
-      }
+      },
     });
   }
 
@@ -119,12 +118,12 @@ export class Hub {
       callback: async (err, msg) => {
         if (err) return;
         try {
-          const req = jc.decode(msg.data) as { key: string; uuid: string };
-          await this.statusKv.put(req.key, sc.encode(req.uuid));
+          const req = JSONCodec().decode(msg.data) as { key: string, uuid: string };
+          await this.statusKv.put(req.key, StringCodec().encode(req.uuid));
         } catch (e) {
           console.error('Failed to handle heartbeat:', e);
         }
-      },
+      }
     });
   }
 
@@ -133,13 +132,13 @@ export class Hub {
       callback: async (err, msg) => {
         if (err) return;
         try {
-          const req = jc.decode(msg.data) as { key: string };
+          const req = JSONCodec().decode(msg.data) as { key: string };
           await this.statusKv.delete(req.key);
           console.log(`Deregistered service liveness: ${req.key}`);
         } catch (e) {
           console.error('Failed to handle deregistration:', e);
         }
-      },
+      }
     });
   }
 }
