@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Users, Calendar, Settings, MessageSquare, Box } from 'lucide-react';
+import { LayoutDashboard, Users, Calendar, Settings, MessageSquare, Box, Database } from 'lucide-react';
 import { useWorkerRegistry } from '../../hooks/useWorkerRegistry';
 
 const Sidebar: React.FC = () => {
@@ -11,6 +11,7 @@ const Sidebar: React.FC = () => {
     { name: 'Agents', path: '/agents', icon: Users },
     { name: 'Schedules', path: '/schedules', icon: Calendar },
     { name: 'System', path: '/system', icon: Settings },
+    { name: 'Cortex', path: '/cortex', icon: Database },
   ];
 
   return (
