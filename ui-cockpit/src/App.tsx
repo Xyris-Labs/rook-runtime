@@ -5,6 +5,7 @@ import Agents from './pages/Agents';
 import Schedules from './pages/Schedules';
 import System from './pages/System';
 import Chat from './pages/Chat';
+import Cortex from './pages/Cortex';
 import { NatsProvider } from './context/NatsContext';
 
 function App() {
@@ -18,6 +19,7 @@ function App() {
             <Route path="agents" element={<Agents />} />
             <Route path="schedules" element={<Schedules />} />
             <Route path="system" element={<System />} />
+            <Route path="cortex" element={<Cortex />} />
           </Route>
         </Routes>
       </BrowserRouter>

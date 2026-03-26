@@ -197,3 +197,15 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #444;
 }
+
+/* ── Cortex: JSON syntax highlighting ─────────────────────────────────────── */
+.cortex-json {
+  color: rgba(255, 255, 255, 0.55);
+  margin: 0;
+}
+.cj-key     { color: #00ff00; }          /* green — keys */
+.cj-string  { color: #a8ff78; }          /* light green — string values */
+.cj-num     { color: #bd93f9; }          /* purple — numbers */
+.cj-bool    { color: #ff79c6; }          /* pink — booleans */
+.cj-null    { color: #6272a4; }          /* muted — null */
+.cj-plain   { color: rgba(255,255,255,0.35); } /* punctuation / whitespace */
