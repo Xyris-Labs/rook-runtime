@@ -43,7 +43,6 @@ function JsonView({ value }: { value: string }) {
 
   const formatted = JSON.stringify(parsed, null, 2);
 
-  // Split on tokens we want to colour; keep delimiters via capture group
   const parts = formatted.split(
     /("(?:\\.|[^"\\])*"(?=\s*:)|"(?:\\.|[^"\\])*"|true|false|null|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g
   );
@@ -51,11 +50,11 @@ function JsonView({ value }: { value: string }) {
   return (
     <pre className="cortex-json font-mono text-xs leading-relaxed overflow-auto max-h-52 p-2 bg-black/30 rounded">
       {parts.map((part, i) => {
-        if (part.match(/^".*":/))    return <span key={i} className="cj-key">{part}</span>;
-        if (part.startsWith('"'))    return <span key={i} className="cj-string">{part}</span>;
+        if (part.match(/^".*":/))               return <span key={i} className="cj-key">{part}</span>;
+        if (part.startsWith('"'))               return <span key={i} className="cj-string">{part}</span>;
         if (part === 'true' || part === 'false') return <span key={i} className="cj-bool">{part}</span>;
-        if (part === 'null')          return <span key={i} className="cj-null">{part}</span>;
-        if (/^-?\d/.test(part))      return <span key={i} className="cj-num">{part}</span>;
+        if (part === 'null')                    return <span key={i} className="cj-null">{part}</span>;
+        if (/^-?\d/.test(part))                 return <span key={i} className="cj-num">{part}</span>;
         return <span key={i} className="cj-plain">{part}</span>;
       })}
     </pre>
@@ -71,15 +70,22 @@ const Cortex: React.FC = () => {
   const [buckets, setBuckets] = useState<BucketInfo[]>([]);
   const [isLoadingBuckets, setIsLoadingBuckets] = useState(false);
 
+  // Bucket management
+  const [isCreatingBucket, setIsCreatingBucket] = useState(false);
+  const [newBucketName, setNewBucketName] = useState('');
+  const [isSavingBucket, setIsSavingBucket] = useState(false);
+  const [confirmDeleteBucket, setConfirmDeleteBucket] = useState<string | null>(null); // streamName
+  const [isDeletingBucket, setIsDeletingBucket] = useState<string | null>(null);      // streamName
+
   // Selected bucket
   const [selectedBucket, setSelectedBucket] = useState<BucketInfo | null>(null);
 
-  // KV entries for selected bucket
+  // KV entries — updated via kv.watch() push subscription, never polled
   const [entries, setEntries] = useState<Map<string, EntryData>>(new Map());
   const [isLoadingEntries, setIsLoadingEntries] = useState(false);
   const [isWatching, setIsWatching] = useState(false);
 
-  // UI state
+  // Key editing / adding
   const [filter, setFilter] = useState('');
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
@@ -88,8 +94,8 @@ const Cortex: React.FC = () => {
   const [newKey, setNewKey] = useState('');
   const [newValue, setNewValue] = useState('');
   const [savingKey, setSavingKey] = useState<string | null>(null);
-  const [flashError, setFlashError] = useState<string | null>(null);
 
+  const [flashError, setFlashError] = useState<string | null>(null);
   const watcherRef = useRef<{ stop: () => void } | null>(null);
 
   // ── Error flash ──────────────────────────────────────────────────────────
@@ -129,7 +135,49 @@ const Cortex: React.FC = () => {
     loadBuckets();
   }, [loadBuckets]);
 
-  // ── Watch selected bucket ─────────────────────────────────────────────────
+  // ── Bucket create / delete ────────────────────────────────────────────────
+
+  const handleCreateBucket = async () => {
+    if (!js || !newBucketName.trim()) return;
+    const name = newBucketName.trim().toUpperCase().replace(/\s+/g, '_');
+    setIsSavingBucket(true);
+    try {
+      // js.views.kv() creates the bucket if it doesn't exist
+      await js.views.kv(name, { history: 1 });
+      setIsCreatingBucket(false);
+      setNewBucketName('');
+      await loadBuckets();
+    } catch (err: any) {
+      showError(`Create failed: ${err.message}`);
+    } finally {
+      setIsSavingBucket(false);
+    }
+  };
+
+  const handleDeleteBucket = async (bucket: BucketInfo) => {
+    if (!connection) return;
+    setIsDeletingBucket(bucket.streamName);
+    try {
+      const jsm = await connection.jetstreamManager();
+      await jsm.streams.delete(bucket.streamName);
+      setConfirmDeleteBucket(null);
+      // Deselect if we just deleted the open bucket
+      if (selectedBucket?.streamName === bucket.streamName) {
+        setSelectedBucket(null);
+      }
+      await loadBuckets();
+    } catch (err: any) {
+      showError(`Delete failed: ${err.message}`);
+    } finally {
+      setIsDeletingBucket(null);
+    }
+  };
+
+  // ── Watch selected bucket (push subscription via kv.watch()) ─────────────
+  //
+  // kv.watch() opens a NATS JetStream push consumer. The server delivers
+  // all current keys upfront then streams live mutations as they happen.
+  // There is no polling — updates arrive the moment NATS publishes them.
 
   useEffect(() => {
     if (!js || !selectedBucket) return;
@@ -152,7 +200,8 @@ const Cortex: React.FC = () => {
 
         let initialized = false;
 
-        // Fallback for empty buckets: mark ready after 600 ms of silence
+        // One-shot fallback: if the bucket is empty the for-await loop never
+        // fires its first iteration, so we use a timeout to clear loading state.
         const initTimer = setTimeout(() => {
           if (!stopped && !initialized) {
             initialized = true;
@@ -171,7 +220,6 @@ const Cortex: React.FC = () => {
         }>) {
           if (stopped) break;
 
-          // First real entry clears loading
           if (!initialized) {
             initialized = true;
             clearTimeout(initTimer);
@@ -213,7 +261,7 @@ const Cortex: React.FC = () => {
     };
   }, [js, selectedBucket]);
 
-  // ── KV operations ────────────────────────────────────────────────────────
+  // ── Key operations ────────────────────────────────────────────────────────
 
   const handleSaveEdit = async (key: string) => {
     if (!js || !selectedBucket) return;
@@ -229,7 +277,7 @@ const Cortex: React.FC = () => {
     }
   };
 
-  const handleDelete = async (key: string) => {
+  const handleDeleteKey = async (key: string) => {
     if (!js || !selectedBucket) return;
     try {
       const kv = await js.views.kv(selectedBucket.bucketName);
@@ -293,18 +341,67 @@ const Cortex: React.FC = () => {
 
         {/* ── Left panel: bucket list ── */}
         <div className="w-64 flex-shrink-0 flex flex-col bg-card border border-divider rounded-lg overflow-hidden">
+
+          {/* Panel header */}
           <div className="px-4 py-3 border-b border-divider flex items-center justify-between flex-shrink-0">
             <span className="text-[10px] font-bold uppercase tracking-widest text-gray-500">KV Buckets</span>
-            <button
-              onClick={loadBuckets}
-              disabled={isLoadingBuckets}
-              className="p-1 rounded hover:bg-active text-gray-600 hover:text-primary transition-colors disabled:opacity-40"
-              title="Refresh bucket list"
-            >
-              <RefreshCcw size={12} className={isLoadingBuckets ? 'animate-spin' : ''} />
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => { setIsCreatingBucket(v => !v); setNewBucketName(''); setConfirmDeleteBucket(null); }}
+                className={`p-1 rounded transition-colors ${
+                  isCreatingBucket
+                    ? 'bg-primary/20 text-primary'
+                    : 'hover:bg-active text-gray-600 hover:text-primary'
+                }`}
+                title="New bucket"
+              >
+                <Plus size={12} />
+              </button>
+              <button
+                onClick={loadBuckets}
+                disabled={isLoadingBuckets}
+                className="p-1 rounded hover:bg-active text-gray-600 hover:text-primary transition-colors disabled:opacity-40"
+                title="Refresh bucket list"
+              >
+                <RefreshCcw size={12} className={isLoadingBuckets ? 'animate-spin' : ''} />
+              </button>
+            </div>
           </div>
 
+          {/* New bucket inline form */}
+          {isCreatingBucket && (
+            <div className="px-3 py-2.5 border-b border-divider bg-primary/[0.04] flex items-center gap-2 flex-shrink-0">
+              <input
+                type="text"
+                value={newBucketName}
+                onChange={e => setNewBucketName(e.target.value)}
+                placeholder="BUCKET_NAME"
+                autoFocus
+                className="flex-1 min-w-0 bg-black/50 border border-divider rounded px-2 py-1 text-xs font-mono text-white placeholder-gray-600 outline-none focus:border-primary uppercase transition-colors"
+                onKeyDown={e => {
+                  if (e.key === 'Enter') handleCreateBucket();
+                  if (e.key === 'Escape') { setIsCreatingBucket(false); setNewBucketName(''); }
+                }}
+              />
+              <button
+                onClick={handleCreateBucket}
+                disabled={!newBucketName.trim() || isSavingBucket}
+                className="p-1.5 rounded bg-primary/20 text-primary hover:bg-primary/30 transition-colors disabled:opacity-40 flex-shrink-0"
+                title="Create bucket"
+              >
+                {isSavingBucket ? <RefreshCcw size={11} className="animate-spin" /> : <Check size={11} />}
+              </button>
+              <button
+                onClick={() => { setIsCreatingBucket(false); setNewBucketName(''); }}
+                className="p-1.5 rounded hover:bg-active text-gray-500 hover:text-white transition-colors flex-shrink-0"
+                title="Cancel"
+              >
+                <X size={11} />
+              </button>
+            </div>
+          )}
+
+          {/* Bucket list */}
           <div className="flex-1 overflow-y-auto">
             {isLoadingBuckets && (
               <div className="p-8 flex justify-center text-gray-600">
@@ -320,17 +417,23 @@ const Cortex: React.FC = () => {
 
             {buckets.map(bucket => {
               const isSelected = selectedBucket?.streamName === bucket.streamName;
+              const isConfirmingDelete = confirmDeleteBucket === bucket.streamName;
+              const isDeleting = isDeletingBucket === bucket.streamName;
               const liveKeyCount = isSelected ? entries.size : bucket.keyCount;
+
               return (
-                <button
+                // div instead of button so we can nest interactive delete controls
+                <div
                   key={bucket.streamName}
                   onClick={() => {
+                    if (isConfirmingDelete) return;
                     setSelectedBucket(bucket);
                     setIsAddingKey(false);
                     setNewKey('');
                     setNewValue('');
+                    setConfirmDeleteBucket(null);
                   }}
-                  className={`w-full px-4 py-3 text-left flex items-center gap-3 transition-colors border-b border-divider/40 last:border-0 ${
+                  className={`group relative w-full px-4 py-3 flex items-center gap-3 transition-colors border-b border-divider/40 last:border-0 cursor-pointer ${
                     isSelected
                       ? 'bg-active text-white'
                       : 'text-gray-400 hover:bg-white/5 hover:text-white'
@@ -355,8 +458,43 @@ const Cortex: React.FC = () => {
                     </div>
                   </div>
 
-                  <Database size={12} className="flex-shrink-0 opacity-30" />
-                </button>
+                  {/* Delete controls — shown on hover or when confirming */}
+                  {isConfirmingDelete ? (
+                    <div
+                      className="flex items-center gap-1 flex-shrink-0"
+                      onClick={e => e.stopPropagation()}
+                    >
+                      <span className="text-[9px] text-red-400 font-bold uppercase mr-0.5">Sure?</span>
+                      <button
+                        onClick={() => handleDeleteBucket(bucket)}
+                        disabled={isDeleting}
+                        className="p-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors disabled:opacity-40"
+                        title="Confirm delete bucket"
+                      >
+                        {isDeleting ? <RefreshCcw size={11} className="animate-spin" /> : <Check size={11} />}
+                      </button>
+                      <button
+                        onClick={() => setConfirmDeleteBucket(null)}
+                        className="p-1 rounded hover:bg-active text-gray-500 hover:text-white transition-colors"
+                        title="Cancel"
+                      >
+                        <X size={11} />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={e => {
+                        e.stopPropagation();
+                        setConfirmDeleteBucket(bucket.streamName);
+                        setIsCreatingBucket(false);
+                      }}
+                      className="flex-shrink-0 p-1 rounded opacity-0 group-hover:opacity-100 text-gray-600 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                      title="Delete bucket"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  )}
+                </div>
               );
             })}
           </div>
@@ -365,7 +503,6 @@ const Cortex: React.FC = () => {
         {/* ── Right panel: KV workspace ── */}
         <div className="flex-1 min-w-0 flex flex-col bg-card border border-divider rounded-lg overflow-hidden">
 
-          {/* Empty state */}
           {!selectedBucket ? (
             <div className="flex-1 flex items-center justify-center">
               <div className="text-center text-gray-600">
@@ -394,7 +531,6 @@ const Cortex: React.FC = () => {
                 </div>
 
                 <div className="flex items-center gap-2">
-                  {/* Filter */}
                   <div className="relative">
                     <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" />
                     <input
@@ -406,13 +542,8 @@ const Cortex: React.FC = () => {
                     />
                   </div>
 
-                  {/* Add key toggle */}
                   <button
-                    onClick={() => {
-                      setIsAddingKey(v => !v);
-                      setNewKey('');
-                      setNewValue('');
-                    }}
+                    onClick={() => { setIsAddingKey(v => !v); setNewKey(''); setNewValue(''); }}
                     className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-bold uppercase tracking-widest transition-colors ${
                       isAddingKey
                         ? 'bg-primary/20 text-primary border border-primary/40'
@@ -535,7 +666,6 @@ const Cortex: React.FC = () => {
                                   className="w-full bg-black/60 border border-primary/60 rounded px-2.5 py-2 text-xs font-mono text-white outline-none focus:border-primary resize-y transition-colors"
                                   onKeyDown={e => {
                                     if (e.key === 'Escape') setEditingKey(null);
-                                    // Shift+Enter always inserts newline; bare Enter saves for single-line strings
                                     if (e.key === 'Enter' && !e.shiftKey && !isJson && !editValue.includes('\n')) {
                                       e.preventDefault();
                                       handleSaveEdit(entry.key);
@@ -594,9 +724,9 @@ const Cortex: React.FC = () => {
                               ) : isConfirmDelete ? (
                                 <div className="flex items-center justify-center gap-1">
                                   <button
-                                    onClick={() => handleDelete(entry.key)}
+                                    onClick={() => handleDeleteKey(entry.key)}
                                     className="p-1.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
-                                    title="Confirm delete"
+                                    title="Confirm delete key"
                                   >
                                     <Check size={12} />
                                   </button>
