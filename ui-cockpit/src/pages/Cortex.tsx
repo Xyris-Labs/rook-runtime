@@ -490,7 +490,7 @@ const Cortex: React.FC = () => {
                 )}
 
                 {!isLoadingEntries && filteredEntries.length > 0 && (
-                  <table className="w-full text-left border-collapse">
+                  <table className="w-full text-left border-collapse" style={{ tableLayout: 'fixed' }}>
                     <thead className="sticky top-0 bg-black/80 backdrop-blur-sm z-10">
                       <tr className="border-b border-divider">
                         <th className="px-5 py-3 text-[10px] font-bold uppercase tracking-widest text-gray-500 w-60">Key</th>
@@ -512,12 +512,12 @@ const Cortex: React.FC = () => {
                           >
                             {/* Key column */}
                             <td className="px-5 py-3 align-top">
-                              <div className="flex items-start gap-2">
-                                <span className="font-mono text-xs text-primary break-all leading-relaxed">
+                              <div className="flex items-start gap-2 min-w-0">
+                                <span className="font-mono text-xs text-primary truncate" title={entry.key}>
                                   {entry.key}
                                 </span>
                                 {isJson && (
-                                  <span className="flex-shrink-0 mt-0.5 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-primary/10 text-primary border border-primary/20 tracking-wide">
+                                  <span className="flex-shrink-0 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded bg-primary/10 text-primary border border-primary/20 tracking-wide">
                                     JSON
                                   </span>
                                 )}
@@ -544,7 +544,7 @@ const Cortex: React.FC = () => {
                                 />
                               ) : isJson ? (
                                 <div
-                                  className="cursor-text"
+                                  className="cursor-text overflow-hidden"
                                   onClick={() => { setEditingKey(entry.key); setEditValue(entry.value); setConfirmDeleteKey(null); }}
                                   title="Click to edit"
                                 >
@@ -552,9 +552,9 @@ const Cortex: React.FC = () => {
                                 </div>
                               ) : (
                                 <span
-                                  className="font-mono text-xs text-gray-300 break-all cursor-text hover:text-white transition-colors leading-relaxed"
+                                  className="font-mono text-xs text-gray-300 block truncate cursor-text hover:text-white transition-colors"
                                   onClick={() => { setEditingKey(entry.key); setEditValue(entry.value); setConfirmDeleteKey(null); }}
-                                  title="Click to edit"
+                                  title={entry.value || undefined}
                                 >
                                   {entry.value || <em className="text-gray-600 not-italic">empty</em>}
                                 </span>
