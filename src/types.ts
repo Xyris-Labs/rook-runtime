@@ -6,7 +6,8 @@ export enum ServiceType {
   LLM_BROKER = 'service.llm.broker',
   LLM_ADAPTER = 'service.llm.adapter',
   MCP_BRIDGE = 'service.mcp.bridge',
-  WEB_HOST = 'service.web'
+  WEB_HOST = 'service.web',
+  SCRIBE = 'service.scribe'
 }
 
 export enum FSScope {

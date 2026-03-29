@@ -11,6 +11,7 @@ import { CopilotAdapter } from '../services/llm/adapters/CopilotAdapter';
 import { OpenAIAdapter } from '../services/llm/adapters/OpenAIAdapter';
 import { TempoServer } from '../services/tempo/TempoServer';
 import { MCPBridge } from '../services/mcp/MCPBridge';
+import { ScribeServer } from '../services/scribe/ScribeServer';
 
 const CONTAINER_UI_DIR = '/data/ui';
 const LOCAL_UI_DIR = path.resolve(__dirname, '../../rook_data/ui');
@@ -51,6 +52,10 @@ async function bootstrap() {
   // Start MCP Bridge for filesystem access in /data
   const mcpFs = new MCPBridge('npx', ['-y', '@modelcontextprotocol/server-filesystem', '/data/artifacts']);
   await mcpFs.start();
+
+  // Start Scribe file server (HTTP on port 7071, NATS registration)
+  const scribe = new ScribeServer();
+  await scribe.start();
 
   // NATS client for the HTTP Proxy
   const natsUrl = process.env.NATS_URL || 'nats://localhost:4222';
