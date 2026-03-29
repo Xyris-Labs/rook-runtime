@@ -16,8 +16,8 @@ import { ScribeServer } from '../services/scribe/ScribeServer';
 const CONTAINER_UI_DIR = '/data/ui';
 const IMAGE_UI_DIR = '/app/ui';
 const LOCAL_UI_DIR = path.resolve(__dirname, '../../ui-cockpit/dist');
-const UI_DIR = fs.existsSync(CONTAINER_UI_DIR) ? CONTAINER_UI_DIR : 
-               (fs.existsSync(IMAGE_UI_DIR) ? IMAGE_UI_DIR : LOCAL_UI_DIR);
+const UI_DIR = fs.existsSync(IMAGE_UI_DIR) ? IMAGE_UI_DIR :
+               (fs.existsSync(CONTAINER_UI_DIR) ? CONTAINER_UI_DIR : LOCAL_UI_DIR);
 
 async function bootstrap() {
   console.log('Bootstrapping Rook v2.0 Service Mesh...');
@@ -55,9 +55,9 @@ async function bootstrap() {
   const mcpFs = new MCPBridge('npx', ['-y', '@modelcontextprotocol/server-filesystem', '/data/artifacts']);
   await mcpFs.start();
 
-  // Start Scribe file server (HTTP on port 7071, NATS registration)
-  const scribe = new ScribeServer();
-  await scribe.start();
+  // Start Scribe file server (Now optional internally, moved to separate container)
+  // const scribe = new ScribeServer();
+  // await scribe.start();
 
   // NATS client for the HTTP Proxy
   const natsUrl = process.env.NATS_URL || 'nats://localhost:4222';
