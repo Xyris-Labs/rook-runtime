@@ -1,0 +1,36 @@
+services:
+  nats:
+    image: nats:2.10.12-alpine
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+      - "8080:8080"
+    command: ["-c", "/etc/nats/nats.conf"]
+    volumes:
+      - ./nats.conf:/etc/nats/nats.conf
+      - nats_data:/tmp/nats/jetstream
+    networks:
+      - rook-net
+
+  runtime:
+    build: .
+    ports:
+      - "7070:7070"
+      - "7071:7071"
+    environment:
+      - NATS_URL=nats://nats:4222
+      - HTTP_PORT=7070
+    volumes:
+      - rook_data:/data
+    depends_on:
+      - nats
+    networks:
+      - rook-net
+
+networks:
+  rook-net:
+    driver: bridge
+
+volumes:
+  nats_data:
+  rook_data:

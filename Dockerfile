@@ -1,23 +1,32 @@
+# Build UI Cockpit
+FROM node:20-slim AS ui-builder
+WORKDIR /app/ui-cockpit
+COPY ui-cockpit/package*.json ./
+RUN npm install
+COPY ui-cockpit/ ./
+RUN npm run build
+
+# Final Runtime Image
 FROM node:20-slim
 
-# Install NATS server
-RUN apt-get update && apt-get install -y curl && \
-    curl -L https://github.com/nats-io/nats-server/releases/download/v2.10.12/nats-server-v2.10.12-linux-amd64.tar.gz | tar xz && \
-    mv nats-server-v2.10.12-linux-amd64/nats-server /usr/local/bin/ && \
-    rm -rf nats-server-v2.10.12-linux-amd64
+# Install dependencies for health checks and bash
+RUN apt-get update && apt-get install -y bash curl && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy package files and install dependencies
+# Copy runtime package files and install dependencies
 COPY package*.json tsconfig.json ./
 RUN npm install
 
-# Copy source code
+# Copy runtime source code
 COPY src ./src
-COPY nats.conf ./
 COPY entrypoint.sh ./
-
 RUN chmod +x entrypoint.sh
+
+# Copy built UI to the expected data directory
+# The runtime expects UI at /app/ui in containers
+RUN mkdir -p /app/ui
+COPY --from=ui-builder /app/ui-cockpit/dist /app/ui
 
 # Environment variables
 ENV NATS_URL=nats://localhost:4222
@@ -27,6 +36,6 @@ ENV HTTP_PORT=7070
 VOLUME /data
 
 # Ports
-EXPOSE 7070 4222 8080
+EXPOSE 7070 7071
 
 ENTRYPOINT ["./entrypoint.sh"]

@@ -14,8 +14,10 @@ import { MCPBridge } from '../services/mcp/MCPBridge';
 import { ScribeServer } from '../services/scribe/ScribeServer';
 
 const CONTAINER_UI_DIR = '/data/ui';
+const IMAGE_UI_DIR = '/app/ui';
 const LOCAL_UI_DIR = path.resolve(__dirname, '../../rook_data/ui');
-const UI_DIR = fs.existsSync(CONTAINER_UI_DIR) ? CONTAINER_UI_DIR : LOCAL_UI_DIR;
+const UI_DIR = fs.existsSync(CONTAINER_UI_DIR) ? CONTAINER_UI_DIR : 
+               (fs.existsSync(IMAGE_UI_DIR) ? IMAGE_UI_DIR : LOCAL_UI_DIR);
 
 async function bootstrap() {
   console.log('Bootstrapping Rook v2.0 Service Mesh...');
@@ -132,7 +134,12 @@ async function bootstrap() {
     if (pathname === '/_/nats') {
       wss.handleUpgrade(request, socket, head, (ws) => {
         const net = require('net');
-        const natsSocket = net.connect(4222, 'localhost', () => {
+        const natsUrlStr = process.env.NATS_URL || 'nats://localhost:4222';
+        const natsUrl = new URL(natsUrlStr.replace('nats://', 'http://')); // URL parser needs a protocol it knows
+        const natsHost = natsUrl.hostname || 'localhost';
+        const natsPort = parseInt(natsUrl.port || '4222');
+
+        const natsSocket = net.connect(natsPort, natsHost, () => {
           ws.on('message', (data: Buffer) => natsSocket.write(data));
           natsSocket.on('data', (data: Buffer) => ws.send(data));
         });
