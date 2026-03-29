@@ -1,0 +1,8 @@
+node_modules
+dist
+.claude
+.git
+.DS_Store
+rook_data
+ui-cockpit/node_modules
+ui-cockpit/dist
