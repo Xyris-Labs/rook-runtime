@@ -21,7 +21,7 @@ services:
       - NATS_URL=nats://nats:4222
       - HTTP_PORT=7070
     volumes:
-      - rook_data:/data
+      - ./rook_data:/data
     depends_on:
       - nats
     networks:
@@ -33,4 +33,3 @@ networks:
 
 volumes:
   nats_data:
-  rook_data:
